@@ -1,6 +1,7 @@
-
+/// <reference types="vite/client" />
 import React, { useState, useEffect, useRef } from 'react';
 import { createRoot } from 'react-dom/client';
+import type { Topic, QuizQuestion, TeacherCategory, Class, LoggedInStudent, Student, ShopItem, Challenge, PendingMissionCompletion, Teacher } from './types';
 import { 
   BookOpen, 
   Sun, 
@@ -100,42 +101,59 @@ const BIBLE_DATASET: Record<string, string> = {
   "벧후 3:11": "이 모든 것이 이렇게 풀어지리니 너희가 어떠한 사람이 되어야 마땅하냐 거룩한 행실과 경건함으로"
 };
 
-type Topic = {
-  id: string;
-  title: string;
-  subTitle: string;
-  Icon: React.ElementType;
-  color: string;
-  verse: string;
-  summary?: string;
-  coreContent: string;
-  deepContent: string;
-  meaningContent: string;
-  missions: string[];
-};
+const TEACHER_PW = '1004';
+const ADMIN_PW = '0220';
 
-type QuizQuestion = {
-  id: string;
-  topicId: string;
-  question: string;
-  options: string[];
-  answerIndex: number;
-  explanation: string;
-};
+const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL ?? '';
+const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY ?? '';
 
-type TeacherCategory = {
-  id: string;
-  name: string;
-  Icon: React.ElementType;
-  color: string;
-  description: string;
-};
+/** Supabase 연동 시 교체 포인트: fetchLoggedInStudents, dream_logged_in_students, dream_students, dream_classes, dream_pending_missions, dream_challenges, dream_completed_challenges, dream_talents 등 각 localStorage 키를 Supabase 테이블/함수로 교체. */
 
-type Student = {
-  id: string;
-  name: string;
-  talents: number;
-};
+async function fetchLoggedInStudents(): Promise<LoggedInStudent[]> {
+  const saved = localStorage.getItem('dream_logged_in_students');
+  return saved ? JSON.parse(saved) : [];
+}
+
+async function fetchMaterials(): Promise<Record<string, { name: string; file: string }[]>> {
+  const res = await fetch('/materials/materials.json');
+  if (!res.ok) return {};
+  const data = await res.json();
+  return data || {};
+}
+
+// 성경 66권 한글 이름 (미니 게임 블록 표시용)
+const BIBLE_BOOKS_66: string[] = [
+  '창세기','출애굽기','레위기','민수기','신명기','여호수아','사사기','룻기','사무엘상','사무엘하','열왕기상','열왕기하','역대상','역대하','에스라','느헤미야','에스더','욥기','시편','잠언','전도서','아가','이사야','예레미야','예레미야애가','에스겔','다니엘','호세아','요엘','아모스','오바댜','요나','미가','나훔','하박국','스바냐','학개','스가랴','말라기',
+  '마태복음','마가복음','누가복음','요한복음','사도행전','로마서','고린도전서','고린도후서','갈라디아서','에베소서','빌립보서','골로새서','데살로니가전서','데살로니가후서','디모데전서','디모데후서','디도서','빌레몬서','히브리서','야고보서','베드로전서','베드로후서','요한일서','요한이서','요한삼서','유다서','요한계시록'
+];
+
+// 테트리스 7종 블록 형태 (행/열)
+const TETROMINO_SHAPES: number[][][] = [
+  [[1,1,1,1]],                                           // I
+  [[1,1],[1,1]],                                          // O
+  [[0,1,0],[1,1,1]],                                      // T
+  [[0,1,1],[1,1,0]],                                      // S
+  [[1,1,0],[0,1,1]],                                      // Z
+  [[1,0,0],[1,1,1]],                                      // J
+  [[0,0,1],[1,1,1]],                                      // L
+];
+
+const COLS = 10;
+const ROWS = 20;
+const TARGET_LINES = 5;
+const TARGET_SCORE = 500;
+
+const DEFAULT_CHALLENGES: Challenge[] = [
+  { id: 'ch-game', title: '미니 게임', description: '성경책 이름을 쌓아서 5줄을 없애 보세요!', talents: 1, type: 'normal' },
+  { id: 'ch-bible', title: '성경 읽기', description: '오늘의 말씀 한 절을 소리 내어 읽어 보세요.', talents: 1, type: 'normal' },
+  { id: 'ch-kakao', title: '선생님께 카톡 보내기', description: '선생님께 인사 카톡을 보내 보세요.', talents: 1, type: 'normal' },
+  { id: 'ch-bet', title: '달란트 2배 도전', description: '달란트를 걸고 완료하면 2배로 받아요! (최대 1 달란트)', talents: 1, type: 'bet' },
+];
+
+const TEACHERS: Teacher[] = [
+  { id: 't1', name: '선생님 1', kakaoLink: 'https://open.kakao.com/o/sample' },
+  { id: 't2', name: '선생님 2', kakaoLink: 'https://open.kakao.com/o/sample' },
+];
 
 const THEOLOGY_TOPICS: Topic[] = [
   {
@@ -316,6 +334,10 @@ const TEACHER_CATEGORIES: TeacherCategory[] = [
   { id: 'slides', name: '교육용 PPT', Icon: Presentation, color: 'bg-orange-500', description: '예배 및 공과 시간에 활용하는 시각 자료' },
   { id: 'corner-learning', name: '코너학습 가이드', Icon: Gamepad2, color: 'bg-rose-500', description: '교육 테마별 활동 매뉴얼' },
   { id: 'talent-gifts', name: '달란트 선물 명단', Icon: Gift, color: 'bg-amber-500', description: '학생별 달란트 관리 및 시상 현황' },
+  { id: 'shop-admin', name: '달란트 상점 관리', Icon: ShoppingBag, color: 'bg-emerald-600', description: '상점 아이템 추가 및 가격 설정' },
+  { id: 'mission-confirm', name: '오늘의 드림 미션 확인', Icon: CheckCircle2, color: 'bg-teal-600', description: '학생이 한 미션을 확인하고 달란트 부여' },
+  { id: 'logged-in-students', name: '로그인한 학생 명단', Icon: Users, color: 'bg-sky-600', description: 'Supabase 연동 후 로그인한 학생 목록' },
+  { id: 'class-management', name: '반별 관리', Icon: Map, color: 'bg-violet-600', description: '반 생성 및 학생 반 배정' },
 ];
 
 const STICKERS = [
@@ -326,22 +348,52 @@ const STICKERS = [
   { id: 'sticker-5', name: '천국의 열쇠', icon: '🔑', price: 200 },
 ];
 
+const CLASS_COLORS: { bg: string; text: string; border: string; borderL: string; light: string }[] = [
+  { bg: 'bg-violet-500', text: 'text-white', border: 'border-violet-600', borderL: 'border-l-violet-600', light: 'bg-violet-50' },
+  { bg: 'bg-amber-500', text: 'text-white', border: 'border-amber-600', borderL: 'border-l-amber-600', light: 'bg-amber-50' },
+  { bg: 'bg-emerald-500', text: 'text-white', border: 'border-emerald-600', borderL: 'border-l-emerald-600', light: 'bg-emerald-50' },
+  { bg: 'bg-rose-500', text: 'text-white', border: 'border-rose-600', borderL: 'border-l-rose-600', light: 'bg-rose-50' },
+  { bg: 'bg-sky-500', text: 'text-white', border: 'border-sky-600', borderL: 'border-l-sky-600', light: 'bg-sky-50' },
+  { bg: 'bg-fuchsia-500', text: 'text-white', border: 'border-fuchsia-600', borderL: 'border-l-fuchsia-600', light: 'bg-fuchsia-50' },
+];
+const DEFAULT_CLASS_COLOR = { bg: 'bg-slate-500', text: 'text-white', border: 'border-slate-600', borderL: 'border-l-slate-600', light: 'bg-slate-50' };
+
 const App: React.FC = () => {
   const [userName, setUserName] = useState<string>(() => localStorage.getItem('dream_user_name') || '');
   const [showNamePrompt, setShowNamePrompt] = useState(false);
   const [tempName, setTempName] = useState('');
   
   const [isTeacherAuthenticated, setIsTeacherAuthenticated] = useState(false);
+  const [isAdmin, setIsAdmin] = useState(false);
   const [showTeacherAuthModal, setShowTeacherAuthModal] = useState(false);
   const [teacherPassword, setTeacherPassword] = useState('');
+  const [authRoleChoice, setAuthRoleChoice] = useState<'student' | 'teacher' | 'admin' | null>(null);
   const [selectedTeacherCategory, setSelectedTeacherCategory] = useState<TeacherCategory | null>(null);
 
   // 교사 라운지 학생 명단 상태
   const [students, setStudents] = useState<Student[]>(() => {
     const saved = localStorage.getItem('dream_students');
+    const parsed: Student[] = saved ? JSON.parse(saved) : [];
+    return parsed.map(s => ({ ...s, classId: s.classId ?? null }));
+  });
+  const [selectedClassFilter, setSelectedClassFilter] = useState<string>('');
+  const [loggedInStudents, setLoggedInStudents] = useState<LoggedInStudent[]>([]);
+  const [classes, setClasses] = useState<Class[]>(() => {
+    const saved = localStorage.getItem('dream_classes');
     return saved ? JSON.parse(saved) : [];
   });
+  const [quizRewardTalents, setQuizRewardTalents] = useState(1);
   const [newStudentName, setNewStudentName] = useState('');
+  const [newShopItemName, setNewShopItemName] = useState('');
+  const [newShopItemIcon, setNewShopItemIcon] = useState('⭐');
+  const [newShopItemPrice, setNewShopItemPrice] = useState(30);
+  const [editingShopItemId, setEditingShopItemId] = useState<string | null>(null);
+  const [editShopName, setEditShopName] = useState('');
+  const [editShopIcon, setEditShopIcon] = useState('');
+  const [editShopPrice, setEditShopPrice] = useState(0);
+  const [newClassName, setNewClassName] = useState('');
+  const [editingClassId, setEditingClassId] = useState<string | null>(null);
+  const [editClassName, setEditClassName] = useState('');
 
   const [talents, setTalents] = useState<number>(() => {
     const saved = localStorage.getItem('dream_talents');
@@ -355,6 +407,61 @@ const App: React.FC = () => {
     const saved = localStorage.getItem('dream_stickers');
     return saved ? JSON.parse(saved) : [];
   });
+
+  const [shopItems, setShopItems] = useState<ShopItem[]>(() => {
+    const saved = localStorage.getItem('dream_shop_items');
+    return saved ? JSON.parse(saved) : STICKERS;
+  });
+
+  const [materialsList, setMaterialsList] = useState<Record<string, { name: string; file: string }[]>>({});
+
+  const [challenges, setChallenges] = useState<Challenge[]>(() => {
+    const saved = localStorage.getItem('dream_challenges');
+    return saved ? JSON.parse(saved) : DEFAULT_CHALLENGES;
+  });
+  const [completedChallenges, setCompletedChallenges] = useState<string[]>(() => {
+    const saved = localStorage.getItem('dream_completed_challenges');
+    return saved ? JSON.parse(saved) : [];
+  });
+  const [selectedChallengeRoom, setSelectedChallengeRoom] = useState(false);
+  const [pendingBetChallengeId, setPendingBetChallengeId] = useState<string | null>(null);
+  const [pendingBetAmount, setPendingBetAmount] = useState(0);
+  const [pendingClassAssign, setPendingClassAssign] = useState<{ studentId: string; classId: string | null } | null>(null);
+  const [unassignedSelectedClassId, setUnassignedSelectedClassId] = useState<Record<string, string>>({});
+  const [editingChallengeId, setEditingChallengeId] = useState<string | null>(null);
+  const [editChallengeTalents, setEditChallengeTalents] = useState(0);
+  const [betInputAmount, setBetInputAmount] = useState(0);
+  const [giftAmountByStudent, setGiftAmountByStudent] = useState<Record<string, number>>({});
+  const [talentGiftListMode, setTalentGiftListMode] = useState<'loggedIn' | 'all'>('all');
+  const [previewViewport, setPreviewViewport] = useState<'desktop' | 'tablet' | 'mobile' | null>(null);
+  const [showPreviewViewportDropdown, setShowPreviewViewportDropdown] = useState(false);
+
+  const [pendingMissionCompletions, setPendingMissionCompletions] = useState<PendingMissionCompletion[]>(() => {
+    const saved = localStorage.getItem('dream_pending_missions');
+    return saved ? JSON.parse(saved) : [];
+  });
+
+  const [blockedStudentIds, setBlockedStudentIds] = useState<string[]>(() => {
+    const saved = localStorage.getItem('dream_blocked_students');
+    return saved ? JSON.parse(saved) : [];
+  });
+
+  // Tetris (성경책 이름 쌓기) game state
+  const emptyGrid = (): string[][] => Array(ROWS).fill(null).map(() => Array(COLS).fill(''));
+  const [tetrisGrid, setTetrisGrid] = useState<string[][]>(emptyGrid);
+  const [tetrisScore, setTetrisScore] = useState(0);
+  const [tetrisLinesCleared, setTetrisLinesCleared] = useState(0);
+  const [tetrisGameOver, setTetrisGameOver] = useState(false);
+  const [tetrisGameStarted, setTetrisGameStarted] = useState(false);
+  type TetrisPiece = { shapeIndex: number; rotation: number; x: number; y: number; bookNames: string[] };
+  const [tetrisPiece, setTetrisPiece] = useState<TetrisPiece | null>(null);
+  const tetrisIntervalRef = useRef<number | null>(null);
+  const tetrisStateRef = useRef({ grid: emptyGrid(), score: 0, linesCleared: 0, gameOver: false, piece: null as TetrisPiece | null });
+  const tetrisOnCompleteRef = useRef<() => void>(() => {});
+
+  // 성경 읽기 챌린지: 현재 표시 구절
+  const bibleEntries = Object.entries(BIBLE_DATASET);
+  const [currentBibleVerseKey, setCurrentBibleVerseKey] = useState<string>(() => bibleEntries[0]?.[0] ?? '');
 
   // Quiz States
   const [isQuizMode, setIsQuizMode] = useState(false);
@@ -373,9 +480,11 @@ const App: React.FC = () => {
   
   // Ref for timer cleanup
   const verseTimerRef = useRef<number | null>(null);
+  const materialFileInputRef = useRef<HTMLInputElement>(null);
 
   const [selectedTopic, setSelectedTopic] = useState<Topic | null>(null);
   const [activeTab, setActiveTab] = useState<'info' | 'deep' | 'meaning' | 'shop' | 'teacher'>('info');
+  const [showClassListView, setShowClassListView] = useState(false);
 
   useEffect(() => {
     localStorage.setItem('dream_talents', talents.toString());
@@ -396,6 +505,38 @@ const App: React.FC = () => {
   useEffect(() => {
     localStorage.setItem('dream_students', JSON.stringify(students));
   }, [students]);
+
+  useEffect(() => {
+    localStorage.setItem('dream_classes', JSON.stringify(classes));
+  }, [classes]);
+
+  useEffect(() => {
+    localStorage.setItem('dream_shop_items', JSON.stringify(shopItems));
+  }, [shopItems]);
+
+  useEffect(() => {
+    localStorage.setItem('dream_challenges', JSON.stringify(challenges));
+  }, [challenges]);
+
+  useEffect(() => {
+    localStorage.setItem('dream_completed_challenges', JSON.stringify(completedChallenges));
+  }, [completedChallenges]);
+
+  useEffect(() => {
+    localStorage.setItem('dream_pending_missions', JSON.stringify(pendingMissionCompletions));
+  }, [pendingMissionCompletions]);
+
+  useEffect(() => {
+    localStorage.setItem('dream_blocked_students', JSON.stringify(blockedStudentIds));
+  }, [blockedStudentIds]);
+
+  useEffect(() => {
+    fetchMaterials().then(setMaterialsList).catch(() => setMaterialsList({}));
+  }, []);
+
+  useEffect(() => {
+    fetchLoggedInStudents().then(setLoggedInStudents).catch(() => setLoggedInStudents([]));
+  }, []);
 
   // 성경 구절 로컬 데이터셋에서 즉시 매핑
   useEffect(() => {
@@ -428,8 +569,26 @@ const App: React.FC = () => {
 
   const handleSaveName = () => {
     if (tempName.trim()) {
-      setUserName(tempName.trim());
+      const name = tempName.trim();
+      const existingLogin = loggedInStudents.find(s => s.name === name);
+      if (existingLogin && blockedStudentIds.includes(existingLogin.id)) {
+        alert('차단된 계정이에요.');
+        return;
+      }
+      setUserName(name);
       setShowNamePrompt(false);
+      if (!localStorage.getItem('dream_first_login_done')) {
+        addTalents(5);
+        localStorage.setItem('dream_first_login_done', '1');
+        setTimeout(() => alert('첫 로그인 선물로 5 달란트가 지급되었어요!'), 100);
+      }
+      setLoggedInStudents(prev => {
+        const existingIdx = prev.findIndex(s => s.name === name);
+        const entry: LoggedInStudent = { id: (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : Date.now().toString(), name, loggedInAt: new Date().toISOString() };
+        const next = existingIdx >= 0 ? prev.map((s, i) => i === existingIdx ? { ...s, loggedInAt: entry.loggedInAt } : s) : [...prev, entry];
+        localStorage.setItem('dream_logged_in_students', JSON.stringify(next));
+        return next;
+      });
     } else {
       alert("이름을 입력해주세요!");
     }
@@ -450,10 +609,28 @@ const App: React.FC = () => {
   const toggleMission = (missionId: string) => {
     if (completedMissions.includes(missionId)) {
       setCompletedMissions(prev => prev.filter(id => id !== missionId));
-      addTalents(-3);
+      setPendingMissionCompletions(prev => prev.filter(p => p.studentName === userName && p.missionId === missionId));
     } else {
       setCompletedMissions(prev => [...prev, missionId]);
-      addTalents(3);
+      if (!userName) return;
+      const parts = missionId.split('-m-');
+      if (parts.length !== 2) return;
+      const [topicId, idxStr] = parts;
+      const topic = THEOLOGY_TOPICS.find(t => t.id === topicId);
+      const missionText = topic?.missions[parseInt(idxStr, 10)] ?? '';
+      const topicTitle = topic?.title ?? '';
+      const studentId = loggedInStudents.find(s => s.name === userName)?.id ?? userName;
+      const newItem: PendingMissionCompletion = {
+        id: (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : Date.now().toString(),
+        studentId,
+        studentName: userName,
+        topicId,
+        topicTitle,
+        missionId,
+        missionText,
+        createdAt: new Date().toISOString(),
+      };
+      setPendingMissionCompletions(prev => [...prev, newItem]);
     }
   };
 
@@ -467,19 +644,95 @@ const App: React.FC = () => {
     setOwnedStickers(prev => [...prev, stickerId]);
   };
 
+  const resetMyTalents = () => {
+    if (!confirm("내 달란트와 수집한 스티커를 모두 초기화할까요?")) return;
+    setTalents(0);
+    setOwnedStickers([]);
+    localStorage.setItem('dream_talents', '0');
+    localStorage.setItem('dream_stickers', '[]');
+  };
+
+  const resetStudentTalents = (id: string) => {
+    if (!confirm("이 학생의 달란트를 0으로 초기화할까요?")) return;
+    setStudents(prev => prev.map(s => s.id === id ? { ...s, talents: 0 } : s));
+  };
+
+  const addShopItem = (name: string, icon: string, price: number) => {
+    if (!name.trim() || price < 0) return;
+    setShopItems(prev => [...prev, { id: Date.now().toString(), name: name.trim(), icon: icon || '📌', price }]);
+  };
+
+  const updateShopItem = (id: string, name: string, icon: string, price: number) => {
+    setShopItems(prev => prev.map(item => item.id === id ? { ...item, name: name.trim(), icon: icon || item.icon, price } : item));
+  };
+
+  const deleteShopItem = (id: string) => {
+    if (!confirm("이 상점 아이템을 삭제할까요?")) return;
+    setShopItems(prev => prev.filter(item => item.id !== id));
+  };
+
+  const startEditShopItem = (item: ShopItem) => {
+    setEditingShopItemId(item.id);
+    setEditShopName(item.name);
+    setEditShopIcon(item.icon);
+    setEditShopPrice(item.price);
+  };
+
+  const saveEditShopItem = () => {
+    if (editingShopItemId) {
+      updateShopItem(editingShopItemId, editShopName, editShopIcon, editShopPrice);
+      setEditingShopItemId(null);
+    }
+  };
+
+  const MATERIAL_CATEGORY_IDS = ['teacher-manual', 'teacher-workbook', 'slides', 'corner-learning'];
+
   const handleTeacherLoungeClick = () => {
     if (isTeacherAuthenticated) {
       setActiveTab('teacher');
       setSelectedTopic(null);
     } else {
+      setAuthRoleChoice(null);
       setShowTeacherAuthModal(true);
     }
   };
 
+  const uploadMaterial = async (categoryId: string, file: File): Promise<void> => {
+    const blobUrl = URL.createObjectURL(file);
+    setMaterialsList(prev => ({
+      ...prev,
+      [categoryId]: [...(prev[categoryId] || []), { name: file.name, file: blobUrl }]
+    }));
+  };
+
+  const deleteMaterial = async (categoryId: string, itemKeyOrIndex: string | number): Promise<void> => {
+    setMaterialsList(prev => {
+      const list = prev[categoryId] || [];
+      const idx = typeof itemKeyOrIndex === 'number' ? itemKeyOrIndex : list.findIndex(m => m.name === itemKeyOrIndex || m.file === itemKeyOrIndex);
+      if (idx < 0) return prev;
+      const item = list[idx];
+      if (item.file.startsWith('blob:')) URL.revokeObjectURL(item.file);
+      return {
+        ...prev,
+        [categoryId]: list.filter((_, i) => i !== idx)
+      };
+    });
+  };
+
   const verifyTeacherPassword = () => {
-    if (teacherPassword === '1004') {
+    if (teacherPassword === ADMIN_PW) {
       setIsTeacherAuthenticated(true);
+      setIsAdmin(true);
       setShowTeacherAuthModal(false);
+      setAuthRoleChoice(null);
+      setActiveTab('teacher');
+      setSelectedTopic(null);
+      setTeacherPassword('');
+    } else if (teacherPassword === TEACHER_PW) {
+      setIsTeacherAuthenticated(true);
+      setIsAdmin(false);
+      setShowTeacherAuthModal(false);
+      setAuthRoleChoice(null);
       setActiveTab('teacher');
       setSelectedTopic(null);
       setTeacherPassword('');
@@ -489,9 +742,23 @@ const App: React.FC = () => {
     }
   };
 
+  const previewGridCols = previewViewport === 'mobile' ? 'grid-cols-1' : previewViewport === 'tablet' ? 'grid-cols-2' : previewViewport === 'desktop' ? 'grid-cols-3' : null;
+
+  const getClassColor = (classId: string) => {
+    const idx = classes.findIndex(c => c.id === classId);
+    if (idx < 0) return DEFAULT_CLASS_COLOR;
+    return CLASS_COLORS[idx % CLASS_COLORS.length];
+  };
+
+  const currentStudent = students.find(s => s.name === userName);
+  const currentClass = currentStudent?.classId ? classes.find(c => c.id === currentStudent.classId) : null;
+  const currentClassColor = currentClass ? getClassColor(currentClass.id) : null;
+
   const resetView = () => {
     setSelectedTopic(null);
     setSelectedTeacherCategory(null);
+    setSelectedChallengeRoom(false);
+    setShowClassListView(false);
     setActiveTab('info');
     setIsQuizMode(false);
     setIsQuizFinished(false);
@@ -502,7 +769,13 @@ const App: React.FC = () => {
     setIsVerseShowing(false);
   };
 
+  const updateChallengeTalents = (challengeId: string, value: number) => {
+    setChallenges(prev => prev.map(c => c.id === challengeId ? { ...c, talents: Math.max(0, value) } : c));
+    setEditingChallengeId(null);
+  };
+
   const startQuiz = (topicId?: string) => {
+    setQuizRewardTalents(topicId === undefined ? 5 : 1);
     const filtered = topicId 
       ? QUIZ_QUESTIONS.filter(q => q.topicId === topicId)
       : QUIZ_QUESTIONS;
@@ -564,6 +837,7 @@ const App: React.FC = () => {
       setIsVerseShowing(false);
     } else {
       setIsQuizFinished(true);
+      addTalents(quizRewardTalents);
     }
   };
 
@@ -590,10 +864,37 @@ const App: React.FC = () => {
     const newStudent: Student = {
       id: Date.now().toString(),
       name: newStudentName.trim(),
-      talents: 0
+      talents: 0,
+      classId: null
     };
     setStudents(prev => [...prev, newStudent]);
     setNewStudentName('');
+  };
+
+  const addClass = (name: string) => {
+    if (!name.trim()) return;
+    setClasses(prev => [...prev, { id: Date.now().toString(), name: name.trim() }]);
+  };
+  const updateClass = (id: string, name: string) => {
+    setClasses(prev => prev.map(c => c.id === id ? { ...c, name: name.trim() } : c));
+  };
+  const deleteClass = (id: string) => {
+    if (!confirm('이 반을 삭제할까요? 해당 반 학생의 반 배정이 해제됩니다.')) return;
+    setStudents(prev => prev.map(s => s.classId === id ? { ...s, classId: null } : s));
+    setClasses(prev => prev.filter(c => c.id !== id));
+  };
+  const assignStudentToClass = (studentId: string, classId: string | null) => {
+    setStudents(prev => prev.map(s => s.id === studentId ? { ...s, classId } : s));
+  };
+
+  const assignUnassignedToClass = (loggedInName: string, classId: string | null) => {
+    if (!classId) return;
+    const existing = students.find(s => s.name === loggedInName);
+    if (existing) {
+      assignStudentToClass(existing.id, classId);
+    } else {
+      setStudents(prev => [...prev, { id: Date.now().toString(), name: loggedInName, talents: 0, classId }]);
+    }
   };
 
   const deleteStudent = (id: string) => {
@@ -606,6 +907,22 @@ const App: React.FC = () => {
     setStudents(prev => prev.map(s => s.id === id ? { ...s, talents: s.talents + amount } : s));
   };
 
+  const confirmMissionCompletion = (pendingId: string) => {
+    const pending = pendingMissionCompletions.find(p => p.id === pendingId);
+    if (!pending) return;
+    const existing = students.find(s => s.name === pending.studentName);
+    if (existing) {
+      giveTalentToStudent(existing.id, 3);
+    } else {
+      setStudents(prev => [...prev, { id: Date.now().toString(), name: pending.studentName, talents: 3, classId: null }]);
+    }
+    setPendingMissionCompletions(prev => prev.filter(p => p.id !== pendingId));
+  };
+
+  const toggleBlockStudent = (loggedInStudentId: string) => {
+    setBlockedStudentIds(prev => prev.includes(loggedInStudentId) ? prev.filter(id => id !== loggedInStudentId) : [...prev, loggedInStudentId]);
+  };
+
   const giveBulkTalents = () => {
     if (students.length === 0) return;
     if (confirm("모든 학생에게 1 달란트씩 선물할까요?")) {
@@ -613,8 +930,126 @@ const App: React.FC = () => {
     }
   };
 
+  // --- Tetris (성경책 이름 쌓기) helpers ---
+  const randomBook = () => BIBLE_BOOKS_66[Math.floor(Math.random() * BIBLE_BOOKS_66.length)];
+  const getShapeCells = (shapeIndex: number, rotation: number): number[][] => {
+    let s = TETROMINO_SHAPES[shapeIndex];
+    for (let r = 0; r < rotation % 4; r++) {
+      const rows = s[0]?.length ?? 0;
+      const cols = s.length;
+      s = Array.from({ length: rows }, (_, i) => Array.from({ length: cols }, (_, j) => s[cols - 1 - j]?.[i] ?? 0));
+    }
+    return s;
+  };
+  const collide = (grid: string[][], piece: TetrisPiece, dx: number, dy: number): boolean => {
+    const cells = getShapeCells(piece.shapeIndex, piece.rotation);
+    for (let row = 0; row < cells.length; row++) {
+      for (let col = 0; col < (cells[row]?.length ?? 0); col++) {
+        if (!cells[row]?.[col]) continue;
+        const ny = piece.y + row + dy;
+        const nx = piece.x + col + dx;
+        if (nx < 0 || nx >= COLS || ny >= ROWS) return true;
+        if (ny >= 0 && grid[ny]?.[nx]) return true;
+      }
+    }
+    return false;
+  };
+  const mergePiece = (grid: string[][], piece: TetrisPiece): string[][] => {
+    const next = grid.map(row => [...row]);
+    const cells = getShapeCells(piece.shapeIndex, piece.rotation);
+    let bi = 0;
+    for (let row = 0; row < cells.length; row++) {
+      for (let col = 0; col < (cells[row]?.length ?? 0); col++) {
+        if (!cells[row]?.[col]) continue;
+        const ny = piece.y + row;
+        const nx = piece.x + col;
+        if (ny >= 0 && ny < ROWS && nx >= 0 && nx < COLS && piece.bookNames[bi])
+          next[ny][nx] = piece.bookNames[bi];
+        bi++;
+      }
+    }
+    return next;
+  };
+  const clearFullLines = (grid: string[][]): { grid: string[][]; cleared: number } => {
+    const full = grid.map((row, i) => (row.every(c => c !== '') ? i : -1)).filter(i => i >= 0);
+    if (full.length === 0) return { grid, cleared: 0 };
+    const emptyRow = Array(COLS).fill('');
+    let next = grid.filter((_, i) => !full.includes(i));
+    for (let i = 0; i < full.length; i++) next = [emptyRow, ...next];
+    return { grid: next, cleared: full.length };
+  };
+  const spawnPiece = (): TetrisPiece => {
+    const shapeIndex = Math.floor(Math.random() * TETROMINO_SHAPES.length);
+    const shape = TETROMINO_SHAPES[shapeIndex];
+    const cellCount = shape.flat().filter(Boolean).length;
+    const bookNames = Array.from({ length: cellCount }, () => randomBook());
+    return { shapeIndex, rotation: 0, x: Math.max(0, Math.floor((COLS - (shape[0]?.length ?? 0)) / 2)), y: 0, bookNames };
+  };
+  const resetTetris = () => {
+    if (tetrisIntervalRef.current) {
+      clearInterval(tetrisIntervalRef.current);
+      tetrisIntervalRef.current = null;
+    }
+    setTetrisGrid(emptyGrid());
+    setTetrisScore(0);
+    setTetrisLinesCleared(0);
+    setTetrisGameOver(false);
+    setTetrisGameStarted(false);
+    setTetrisPiece(null);
+  };
+  const startTetris = () => {
+    resetTetris();
+    const piece = spawnPiece();
+    setTetrisPiece(piece);
+    setTetrisGameStarted(true);
+  };
+
+  useEffect(() => {
+    tetrisStateRef.current = { grid: tetrisGrid, score: tetrisScore, linesCleared: tetrisLinesCleared, gameOver: tetrisGameOver, piece: tetrisPiece };
+  }, [tetrisGrid, tetrisScore, tetrisLinesCleared, tetrisGameOver, tetrisPiece]);
+
+  useEffect(() => {
+    if (!tetrisGameStarted || tetrisGameOver) return;
+    tetrisIntervalRef.current = window.setInterval(() => {
+      const { grid, piece } = tetrisStateRef.current;
+      if (!piece) return;
+      if (collide(grid, piece, 0, 1)) {
+        const merged = mergePiece(grid, piece);
+        const { grid: afterClear, cleared } = clearFullLines(merged);
+        const addScore = cleared * 100;
+        const newLines = (tetrisStateRef.current.linesCleared || 0) + cleared;
+        const newScore = (tetrisStateRef.current.score || 0) + addScore;
+        const next = spawnPiece();
+        tetrisStateRef.current.grid = afterClear;
+        tetrisStateRef.current.linesCleared = newLines;
+        tetrisStateRef.current.score = newScore;
+        tetrisStateRef.current.piece = next;
+        setTetrisGrid(afterClear);
+        setTetrisScore(s => s + addScore);
+        setTetrisLinesCleared(l => l + cleared);
+        if (newLines >= TARGET_LINES || newScore >= TARGET_SCORE) {
+          if (tetrisIntervalRef.current) { clearInterval(tetrisIntervalRef.current); tetrisIntervalRef.current = null; }
+          setTetrisGameOver(true);
+          tetrisOnCompleteRef.current();
+          return;
+        }
+        if (collide(afterClear, next, 0, 0)) {
+          if (tetrisIntervalRef.current) { clearInterval(tetrisIntervalRef.current); tetrisIntervalRef.current = null; }
+          setTetrisGameOver(true);
+          return;
+        }
+        setTetrisPiece(next);
+      } else {
+        setTetrisPiece(p => p ? { ...p, y: p.y + 1 } : null);
+      }
+    }, 500);
+    return () => {
+      if (tetrisIntervalRef.current) clearInterval(tetrisIntervalRef.current);
+    };
+  }, [tetrisGameStarted, tetrisGameOver]);
+
   return (
-    <div className="min-h-screen pb-20 overflow-x-hidden text-slate-800 bg-sky-50/50">
+    <div className="min-h-screen pb-20 overflow-x-hidden text-slate-800 bg-sky-50/50 border-l-0 outline-none [outline:0]">
       {/* Name Prompt Modal */}
       {showNamePrompt && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 backdrop-blur-sm p-6">
@@ -633,30 +1068,55 @@ const App: React.FC = () => {
         </div>
       )}
 
-      {/* Teacher Auth Modal */}
+      {/* 입장 모달: 역할 선택(학생/교사/관리자) + 비밀번호(교사·관리자) */}
       {showTeacherAuthModal && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 backdrop-blur-md p-6">
           <div className="bg-white p-8 rounded-[40px] shadow-2xl w-full max-w-[340px] space-y-5 animate-in zoom-in-95 duration-300">
-            <div className="text-center space-y-2">
-              <div className="w-16 h-16 bg-slate-800 rounded-2xl flex items-center justify-center mx-auto text-white shadow-lg"><Lock className="w-8 h-8" /></div>
-              <h3 className="text-xl font-black text-slate-900">선생님 전용실</h3>
-              <p className="text-slate-500 font-bold text-sm">비밀번호를 입력해 주세요!</p>
-            </div>
-            <div className="relative">
-              <input 
-                type="password" 
-                value={teacherPassword} 
-                onChange={(e) => setTeacherPassword(e.target.value)} 
-                onKeyDown={(e) => e.key === 'Enter' && verifyTeacherPassword()} 
-                placeholder="비밀번호 4자리" 
-                className="w-full px-6 py-3.5 bg-slate-50 border-2 border-slate-100 rounded-[20px] font-bold text-xl text-center focus:border-slate-800 focus:outline-none tracking-[0.8em]" 
-              />
-              <KeyRound className="absolute right-5 top-1/2 -translate-y-1/2 text-slate-300 w-5 h-5" />
-            </div>
-            <div className="flex gap-2">
-              <button onClick={() => setShowTeacherAuthModal(false)} className="flex-1 py-3.5 bg-slate-100 text-slate-500 rounded-[20px] font-bold hover:bg-slate-200 transition-colors">취소</button>
-              <button onClick={verifyTeacherPassword} className="flex-2 py-3.5 bg-slate-800 text-white rounded-[20px] font-black shadow-lg shadow-slate-200 hover:bg-slate-900 transition-all active:scale-95">입장하기</button>
-            </div>
+            {authRoleChoice === null ? (
+              <>
+                <div className="text-center space-y-2">
+                  <h3 className="text-xl font-black text-slate-900">누구로 입장할까요?</h3>
+                  <p className="text-slate-500 font-bold text-sm">역할을 선택해 주세요</p>
+                </div>
+                <div className="flex flex-col gap-3">
+                  <button onClick={() => { setShowTeacherAuthModal(false); setAuthRoleChoice(null); if (!userName) setShowNamePrompt(true); }} className="flex items-center gap-3 w-full py-4 px-5 bg-sky-50 text-sky-700 rounded-2xl font-bold border-2 border-sky-100 hover:bg-sky-100 transition-colors">
+                    <User className="w-6 h-6" />
+                    <span>학생</span>
+                  </button>
+                  <button onClick={() => setAuthRoleChoice('teacher')} className="flex items-center gap-3 w-full py-4 px-5 bg-slate-100 text-slate-700 rounded-2xl font-bold border-2 border-slate-200 hover:bg-slate-200 transition-colors">
+                    <KeyRound className="w-6 h-6" />
+                    <span>교사</span>
+                  </button>
+                  <button onClick={() => setAuthRoleChoice('admin')} className="flex items-center gap-3 w-full py-4 px-5 bg-slate-700 text-white rounded-2xl font-bold border-2 border-slate-600 hover:bg-slate-800 transition-colors">
+                    <Lock className="w-6 h-6" />
+                    <span>관리자</span>
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="text-center space-y-2">
+                  <div className="w-16 h-16 bg-slate-800 rounded-2xl flex items-center justify-center mx-auto text-white shadow-lg">{authRoleChoice === 'admin' ? <Lock className="w-8 h-8" /> : <KeyRound className="w-8 h-8" />}</div>
+                  <h3 className="text-xl font-black text-slate-900">{authRoleChoice === 'admin' ? '관리자' : '교사'} 입장</h3>
+                  <p className="text-slate-500 font-bold text-sm">{authRoleChoice === 'admin' ? '관리자' : '교사'} 비밀번호를 입력해 주세요!</p>
+                </div>
+                <div className="relative">
+                  <input 
+                    type="password" 
+                    value={teacherPassword} 
+                    onChange={(e) => setTeacherPassword(e.target.value)} 
+                    onKeyDown={(e) => e.key === 'Enter' && verifyTeacherPassword()} 
+                    placeholder="비밀번호 4자리" 
+                    className="w-full px-6 py-3.5 bg-slate-50 border-2 border-slate-100 rounded-[20px] font-bold text-xl text-center focus:border-slate-800 focus:outline-none tracking-[0.8em]" 
+                  />
+                  <KeyRound className="absolute right-5 top-1/2 -translate-y-1/2 text-slate-300 w-5 h-5" />
+                </div>
+                <div className="flex gap-2">
+                  <button onClick={() => { setAuthRoleChoice(null); setTeacherPassword(''); setShowTeacherAuthModal(false); }} className="flex-1 py-3.5 bg-slate-100 text-slate-500 rounded-[20px] font-bold hover:bg-slate-200 transition-colors">취소</button>
+                  <button onClick={verifyTeacherPassword} className="flex-2 py-3.5 bg-slate-800 text-white rounded-[20px] font-black shadow-lg shadow-slate-200 hover:bg-slate-900 transition-all active:scale-95">입장하기</button>
+                </div>
+              </>
+            )}
           </div>
         </div>
       )}
@@ -672,25 +1132,95 @@ const App: React.FC = () => {
             </div>
           </div>
         </div>
-        <div className="flex items-center gap-3">
-          <div className="flex items-center gap-2 px-3 py-2 sm:px-4 bg-amber-100 border-2 border-amber-200 rounded-2xl shadow-sm">
-            <Coins className="w-4 h-4 sm:w-5 sm:h-5 text-amber-500 fill-amber-500" />
-            <span className="font-black text-amber-700 tabular-nums text-sm sm:text-base">{talents}</span>
+        <div className="flex items-center gap-4">
+          {/* 툴바: 주요 액션 + D/T/M (앱 톤 흰 카드) */}
+          <div className="bg-white rounded-2xl shadow-sm border border-sky-100 px-3 py-2 flex items-center gap-2">
+            <button onClick={handleTeacherLoungeClick} className={`flex items-center gap-2 px-3 py-2 rounded-xl font-bold text-sm transition-colors border ${isTeacherAuthenticated ? 'bg-slate-700 text-white hover:bg-slate-800 border-slate-600' : 'bg-sky-50 text-sky-700 hover:bg-sky-100 border-sky-100'}`}>
+              {isTeacherAuthenticated ? <Library className="w-4 h-4 sm:w-5 sm:h-5" /> : <KeyRound className="w-4 h-4 sm:w-5 sm:h-5" />}
+              <span className="hidden sm:inline">{isTeacherAuthenticated ? '교사 라운지' : '입장'}</span>
+            </button>
+            <div className="flex items-center gap-2 px-3 py-2 sm:px-4 bg-amber-100 border-2 border-amber-200 rounded-2xl shadow-sm">
+              <Coins className="w-4 h-4 sm:w-5 sm:h-5 text-amber-500 fill-amber-500" />
+              <span className="font-black text-amber-700 tabular-nums text-sm sm:text-base">{talents}</span>
+            </div>
+            {classes.length > 0 && (
+              <button onClick={() => { resetView(); setShowClassListView(true); }} className="flex items-center gap-2 px-3 py-2 rounded-xl font-bold text-sm transition-colors bg-sky-50 text-sky-700 hover:bg-sky-100 border border-sky-100" title="반별 친구들">
+                <Users className="w-4 h-4 sm:w-5 sm:h-5" />
+                <span className="hidden sm:inline">반별 친구들</span>
+              </button>
+            )}
+            <button onClick={() => { resetView(); setActiveTab('shop'); }} title="달란트상점" className={`flex items-center gap-2 px-3 py-2 rounded-xl transition-colors border ${activeTab === 'shop' ? 'bg-sky-500 text-white border-sky-500' : 'bg-sky-50 text-sky-700 hover:bg-sky-100 border-sky-100'}`}><ShoppingBag className="w-5 h-5 sm:w-6 sm:h-6 shrink-0" /><span className="hidden sm:inline font-bold">달란트상점</span></button>
+            {import.meta.env.DEV && (
+              <div className="hidden sm:block relative border-l border-sky-100 pl-2">
+                <button type="button" onClick={() => setShowPreviewViewportDropdown(v => !v)} className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-bold ${previewViewport ? 'bg-slate-700 text-white' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`} title="미리보기">
+                  {previewViewport === 'desktop' ? '데스크탑' : previewViewport === 'tablet' ? '테블릿' : previewViewport === 'mobile' ? '모바일' : '미리보기'}
+                </button>
+                {showPreviewViewportDropdown && (
+                  <div className="absolute right-0 top-full mt-1 py-1 bg-white rounded-xl shadow-lg border border-slate-200 z-50 min-w-[120px]">
+                    <button type="button" onClick={() => { setPreviewViewport(null); setShowPreviewViewportDropdown(false); }} className={`w-full px-3 py-2 text-left text-xs font-bold rounded-lg ${!previewViewport ? 'bg-slate-100 text-slate-700' : 'text-slate-600 hover:bg-slate-50'}`}>기본(해제)</button>
+                    <button type="button" onClick={() => { setPreviewViewport('desktop'); setShowPreviewViewportDropdown(false); }} className={`w-full px-3 py-2 text-left text-xs font-bold rounded-lg ${previewViewport === 'desktop' ? 'bg-slate-100 text-slate-700' : 'text-slate-600 hover:bg-slate-50'}`}>데스크탑</button>
+                    <button type="button" onClick={() => { setPreviewViewport('tablet'); setShowPreviewViewportDropdown(false); }} className={`w-full px-3 py-2 text-left text-xs font-bold rounded-lg ${previewViewport === 'tablet' ? 'bg-slate-100 text-slate-700' : 'text-slate-600 hover:bg-slate-50'}`}>테블릿</button>
+                    <button type="button" onClick={() => { setPreviewViewport('mobile'); setShowPreviewViewportDropdown(false); }} className={`w-full px-3 py-2 text-left text-xs font-bold rounded-lg ${previewViewport === 'mobile' ? 'bg-slate-100 text-slate-700' : 'text-slate-600 hover:bg-slate-50'}`}>모바일</button>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
-          <button onClick={() => { resetView(); setActiveTab('shop'); }} className={`p-2 rounded-xl transition-colors ${activeTab === 'shop' ? 'bg-sky-500 text-white' : 'bg-sky-100 text-sky-600 hover:bg-sky-200'}`}><ShoppingBag className="w-5 h-5 sm:w-6 sm:h-6" /></button>
-          {!userName ? (
-            <button onClick={() => setShowNamePrompt(true)} className="p-2 bg-sky-100 text-sky-500 rounded-xl hover:bg-sky-200"><User className="w-5 h-5" /></button>
-          ) : (
-            <div className="flex items-center gap-2 pl-2 border-l border-slate-200 ml-1">
-              <span className="text-xs font-black text-sky-700 hidden md:block">{userName} 어린이</span>
+          {/* 사용자: 프로필 필 (이름 있을 때만; 없을 땐 입장→학생으로 이름 입력 유도) */}
+          {userName && (
+            <div className="rounded-2xl px-3 py-2 bg-sky-50 border border-sky-100 flex items-center gap-2">
+              <span className="text-xs font-black text-sky-700 hidden md:block">
+                {userName} 어린이
+                {currentClass && (
+                  <span className={currentClassColor ? `ml-1 px-1.5 py-0.5 rounded ${currentClassColor.bg} ${currentClassColor.text}` : ''}>
+                    ({currentClass.name})
+                  </span>
+                )}
+              </span>
               <button onClick={handleLogout} className="p-1.5 text-slate-300 hover:text-slate-500"><LogOut className="w-4 h-4" /></button>
             </div>
           )}
         </div>
       </header>
 
-      <main className="max-w-4xl p-6 mx-auto">
-        {isQuizMode ? (
+      <main className={`p-4 sm:p-6 mx-auto transition-all ${previewViewport === 'desktop' ? 'max-w-[1280px]' : previewViewport === 'tablet' ? 'max-w-[768px]' : previewViewport === 'mobile' ? 'max-w-[375px]' : 'max-w-4xl'} ${previewViewport ? 'ring-2 ring-amber-300 ring-inset rounded-lg' : ''}`}>
+        {showClassListView ? (
+          <div className="space-y-6 animate-in fade-in duration-300">
+            <div className="flex items-center gap-4">
+              <button onClick={() => setShowClassListView(false)} className="p-3 bg-white rounded-2xl shadow-sm hover:bg-slate-50 transition-colors">
+                <ChevronLeft className="w-6 h-6" />
+              </button>
+              <div>
+                <h2 className="text-2xl font-black text-slate-800">반별 친구들</h2>
+                <p className="text-sm font-bold text-slate-500">반별로 정리된 친구 명단이에요</p>
+              </div>
+            </div>
+            <div className={`grid gap-4 ${previewGridCols ?? 'grid-cols-1 sm:grid-cols-2 lg:grid-cols-3'}`}>
+              {classes.map(c => {
+                const classStudents = students.filter(s => s.classId === c.id);
+                const color = getClassColor(c.id);
+                return (
+                  <div key={c.id} className="p-0 bg-white rounded-2xl border-2 border-slate-100 shadow-sm hover:border-violet-100 transition-colors overflow-hidden">
+                    <div className={`px-4 py-3 rounded-t-2xl ${color.bg} ${color.text} font-black text-base whitespace-nowrap overflow-hidden text-ellipsis`}>
+                      {c.name}
+                    </div>
+                    <div className="p-4">
+                      {classStudents.length === 0 ? (
+                        <p className="text-slate-400 text-sm font-medium">비어 있음</p>
+                      ) : (
+                        <div className="flex flex-wrap gap-2">
+                          {classStudents.map(s => (
+                            <span key={s.id} className="px-3 py-1.5 bg-sky-50 text-sky-700 rounded-xl text-sm font-bold border border-sky-100">{s.name}</span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        ) : isQuizMode ? (
           <div key={`quiz-session-${quizSessionKey}`} className="space-y-8 animate-in zoom-in-95 duration-500 pt-4">
             <div className="flex flex-col sm:flex-row items-center justify-between gap-4 mb-4">
               <div className="flex items-center gap-2 w-full sm:w-auto">
@@ -814,9 +1344,12 @@ const App: React.FC = () => {
         ) : !selectedTopic && activeTab !== 'teacher' ? (
           activeTab === 'shop' ? (
             <div className="space-y-8 animate-in fade-in duration-500">
-              <div className="flex items-center gap-4"><button onClick={resetView} className="p-3 bg-white rounded-2xl shadow-sm hover:bg-slate-50 transition-colors"><ChevronLeft className="w-6 h-6" /></button><h2 className="text-3xl font-black text-slate-800">달란트 상점</h2></div>
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
-                {STICKERS.map(sticker => {
+              <div className="flex flex-wrap items-center justify-between gap-4">
+                <div className="flex items-center gap-4"><button onClick={resetView} className="p-3 bg-white rounded-2xl shadow-sm hover:bg-slate-50 transition-colors"><ChevronLeft className="w-6 h-6" /></button><h2 className="text-3xl font-black text-slate-800">달란트 상점</h2></div>
+                <button onClick={resetMyTalents} className="px-4 py-2.5 bg-slate-100 text-slate-600 rounded-2xl font-bold hover:bg-slate-200 transition-colors flex items-center gap-2 text-sm"><RefreshCw className="w-4 h-4" /> 내 달란트 초기화</button>
+              </div>
+              <div className={`grid gap-6 ${previewGridCols ?? 'grid-cols-1 sm:grid-cols-2 lg:grid-cols-3'}`}>
+                {(shopItems.length ? shopItems : STICKERS).map(sticker => {
                   const isOwned = ownedStickers.includes(sticker.id);
                   return (
                     <div key={sticker.id} className={`p-6 bg-white rounded-3xl shadow-md border-2 transition-all ${isOwned ? 'border-sky-200 opacity-60' : 'border-transparent hover:border-amber-200'}`}>
@@ -825,6 +1358,167 @@ const App: React.FC = () => {
                         <h4 className="font-black text-lg">{sticker.name}</h4>
                         <button onClick={() => buySticker(sticker.id, sticker.price)} disabled={isOwned} className={`w-full py-2 rounded-xl font-bold flex items-center justify-center gap-2 ${isOwned ? 'bg-slate-100 text-slate-400' : 'bg-amber-400 text-white hover:bg-amber-500 shadow-md shadow-amber-100'}`}>{isOwned ? <CheckCircle2 className="w-5 h-5" /> : <><Coins className="w-4 h-4" /> {sticker.price}</>}{isOwned ? '수집 완료' : '교환하기'}</button>
                       </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          ) : selectedChallengeRoom ? (
+            <div className="space-y-8 animate-in fade-in duration-500">
+              <div className="flex items-center gap-4">
+                <button onClick={() => setSelectedChallengeRoom(false)} className="p-3 bg-white rounded-2xl shadow-sm hover:bg-slate-50 transition-colors">
+                  <ChevronLeft className="w-6 h-6" />
+                </button>
+                <div className="flex items-center gap-3">
+                  <div className="p-3 rounded-2xl bg-amber-500 text-white">
+                    <Trophy className="w-6 h-6" />
+                  </div>
+                  <div>
+                    <h2 className="text-2xl font-black text-slate-800">챌린지 방</h2>
+                    <p className="text-slate-400 font-bold text-sm">달란트를 모아 보세요!</p>
+                  </div>
+                </div>
+              </div>
+              <div className="grid gap-4">
+                {challenges.map(ch => {
+                  const isCompleted = completedChallenges.includes(ch.id);
+                  const isBetPending = pendingBetChallengeId === ch.id;
+                  const isEditing = isAdmin && editingChallengeId === ch.id;
+                  return (
+                    <div key={ch.id} className="p-6 bg-white rounded-[32px] border-2 border-amber-100 shadow-lg space-y-4">
+                      <div className="flex items-start justify-between gap-4">
+                        <div>
+                          <h3 className="text-xl font-black text-slate-800">{ch.title}</h3>
+                          <p className="text-slate-600 font-medium mt-1">{ch.description}</p>
+                          {ch.type === 'normal' ? (
+                            <p className="mt-2 font-black text-amber-600">완료 시 {ch.talents} 달란트</p>
+                          ) : (
+                            <p className="mt-2 font-black text-amber-600">달란트 걸기 (완료 시 2배, 최대 {ch.talents} 달란트)</p>
+                          )}
+                        </div>
+                        {isAdmin && (
+                          isEditing ? (
+                            <div className="flex items-center gap-2">
+                              <input type="number" min={0} value={editChallengeTalents} onChange={(e) => setEditChallengeTalents(Number(e.target.value) || 0)} className="w-20 px-2 py-1 border rounded-lg font-bold" />
+                              <button onClick={() => updateChallengeTalents(ch.id, editChallengeTalents)} className="px-3 py-1 bg-amber-500 text-white rounded-lg font-bold text-sm">저장</button>
+                              <button onClick={() => setEditingChallengeId(null)} className="px-3 py-1 bg-slate-200 rounded-lg font-bold text-sm">취소</button>
+                            </div>
+                          ) : (
+                            <button onClick={() => { setEditingChallengeId(ch.id); setEditChallengeTalents(ch.talents); }} className="p-2 bg-slate-100 rounded-xl font-bold text-sm">달란트 수정</button>
+                          )
+                        )}
+                      </div>
+                      {ch.type === 'normal' ? (
+                        isCompleted ? (
+                          <p className="font-bold text-slate-400">완료했어요!</p>
+                        ) : ch.id === 'ch-game' ? (
+                          (() => {
+                            tetrisOnCompleteRef.current = () => { addTalents(ch.talents); setCompletedChallenges(prev => [...prev, ch.id]); };
+                            if (!tetrisGameStarted && !tetrisGameOver) {
+                              return (
+                                <div className="space-y-3">
+                                  <p className="text-slate-600 font-medium text-sm">성경책 이름이 떨어지는 블록을 맞춰 5줄을 없애면 완료!</p>
+                                  <button onClick={startTetris} className="px-6 py-3 bg-amber-500 text-white rounded-2xl font-black hover:bg-amber-600 flex items-center gap-2">
+                                    <Gamepad2 className="w-5 h-5" /> 게임 시작
+                                  </button>
+                                </div>
+                              );
+                            }
+                            if (tetrisGameOver && (tetrisLinesCleared >= TARGET_LINES || tetrisScore >= TARGET_SCORE)) {
+                              return <p className="font-bold text-green-600">챌린지 완료! {ch.talents} 달란트를 받았어요!</p>;
+                            }
+                            if (tetrisGameOver) {
+                              return (
+                                <div className="space-y-2">
+                                  <p className="font-bold text-slate-500">게임 오버. 다시 도전해 보세요!</p>
+                                  <button onClick={startTetris} className="px-4 py-2 bg-slate-500 text-white rounded-xl font-bold text-sm">다시 하기</button>
+                                </div>
+                              );
+                            }
+                            const cells = tetrisPiece ? getShapeCells(tetrisPiece.shapeIndex, tetrisPiece.rotation) : [];
+                            return (
+                              <div className="space-y-2">
+                                <div className="flex gap-4 text-sm font-bold">
+                                  <span>점수: {tetrisScore}</span>
+                                  <span>줄: {tetrisLinesCleared} / {TARGET_LINES}</span>
+                                </div>
+                                <div className="inline-block border-2 border-slate-300 rounded-lg p-1 bg-slate-900" style={{ width: COLS * 18, height: ROWS * 18 }}>
+                                  {Array.from({ length: ROWS }, (_, row) => (
+                                    <div key={row} className="flex">
+                                      {Array.from({ length: COLS }, (_, col) => {
+                                        let label = tetrisGrid[row]?.[col] ?? '';
+                                        if (!label && tetrisPiece) {
+                                          const cellsR = getShapeCells(tetrisPiece.shapeIndex, tetrisPiece.rotation);
+                                          let bi = 0;
+                                          for (let r = 0; r < cellsR.length; r++)
+                                            for (let c = 0; c < (cellsR[r]?.length ?? 0); c++) {
+                                              if (cellsR[r]?.[c] && tetrisPiece.y + r === row && tetrisPiece.x + c === col)
+                                                label = tetrisPiece.bookNames[bi] ?? '';
+                                              if (cellsR[r]?.[c]) bi++;
+                                            }
+                                        }
+                                        return (
+                                          <div key={col} className="w-4 h-4 border border-slate-700 shrink-0 flex items-center justify-center text-[8px] font-bold overflow-hidden bg-slate-800" title={label}>
+                                            {label ? label.slice(0, 2) : ''}
+                                          </div>
+                                        );
+                                      })}
+                                    </div>
+                                  ))}
+                                </div>
+                                <div className="flex gap-2 flex-wrap">
+                                  <button type="button" onClick={() => { if (tetrisPiece && !collide(tetrisGrid, tetrisPiece, -1, 0)) setTetrisPiece(p => p ? { ...p, x: p.x - 1 } : null); }} className="px-3 py-1.5 bg-slate-500 text-white rounded-lg font-bold text-sm">←</button>
+                                  <button type="button" onClick={() => { if (tetrisPiece && !collide(tetrisGrid, tetrisPiece, 1, 0)) setTetrisPiece(p => p ? { ...p, x: p.x + 1 } : null); }} className="px-3 py-1.5 bg-slate-500 text-white rounded-lg font-bold text-sm">→</button>
+                                  <button type="button" onClick={() => { if (!tetrisPiece) return; const np = { ...tetrisPiece, y: tetrisPiece.y + 1 }; if (!collide(tetrisGrid, np, 0, 0)) setTetrisPiece(np); }} className="px-3 py-1.5 bg-amber-500 text-white rounded-lg font-bold text-sm">↓</button>
+                                </div>
+                              </div>
+                            );
+                          })()
+                        ) : ch.id === 'ch-bible' ? (
+                          <div className="space-y-4">
+                            <div className="p-4 bg-amber-50 rounded-2xl border border-amber-200">
+                              <p className="text-xs font-black text-amber-700 mb-1">{currentBibleVerseKey}</p>
+                              <p className="text-slate-700 font-medium leading-relaxed">{BIBLE_DATASET[currentBibleVerseKey] ?? ''}</p>
+                            </div>
+                            <div className="flex gap-2">
+                              <button onClick={() => setCurrentBibleVerseKey(bibleEntries[Math.floor(Math.random() * bibleEntries.length)]?.[0] ?? currentBibleVerseKey)} className="px-4 py-2 bg-slate-100 text-slate-600 rounded-xl font-bold text-sm">다른 구절 보기</button>
+                              <button onClick={() => { addTalents(ch.talents); setCompletedChallenges(prev => [...prev, ch.id]); }} className="px-6 py-3 bg-amber-500 text-white rounded-2xl font-black hover:bg-amber-600">소리 내어 읽었어요</button>
+                            </div>
+                          </div>
+                        ) : ch.id === 'ch-kakao' ? (
+                          <div className="space-y-4">
+                            <div className="flex flex-wrap gap-2">
+                              {TEACHERS.map(t => (
+                                <a key={t.id} href={t.kakaoLink} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-2 px-4 py-2 bg-yellow-100 text-yellow-800 rounded-xl font-bold hover:bg-yellow-200 border border-yellow-300">
+                                  <MessageCircle className="w-5 h-5" /> {t.name} 카톡으로 인사하기
+                                </a>
+                              ))}
+                            </div>
+                            <button onClick={() => { addTalents(ch.talents); setCompletedChallenges(prev => [...prev, ch.id]); }} className="px-6 py-3 bg-amber-500 text-white rounded-2xl font-black hover:bg-amber-600">인사 보냈어요</button>
+                          </div>
+                        ) : (
+                          <button onClick={() => { setCompletedChallenges(prev => [...prev, ch.id]); addTalents(ch.talents); }} className="px-6 py-3 bg-amber-500 text-white rounded-2xl font-black hover:bg-amber-600">완료했어요</button>
+                        )
+                      ) : (
+                        <div className="space-y-2">
+                          {ch.id === 'ch-bet' && (
+                            <p className="text-slate-600 font-medium text-sm bg-amber-50 p-3 rounded-xl border border-amber-100">오늘 미션: 가족에게 배운 말씀 한 줄 전하기. 완료하면 걸었던 달란트 2배!</p>
+                          )}
+                          {isCompleted ? (
+                            <p className="font-bold text-slate-400">완료했어요!</p>
+                          ) : isBetPending ? (
+                            <>
+                              <p className="font-bold text-slate-600">{pendingBetAmount} 달란트 걸었어요. 완료하면 2배로 받아요!</p>
+                              <button onClick={() => { addTalents(pendingBetAmount * 2); setCompletedChallenges(prev => [...prev, ch.id]); setPendingBetChallengeId(null); setPendingBetAmount(0); }} className="px-6 py-3 bg-amber-500 text-white rounded-2xl font-black hover:bg-amber-600">완료했어요 (2배 받기)</button>
+                            </>
+                          ) : (
+                            <div className="flex flex-wrap items-center gap-2">
+                              <input type="number" min={1} max={Math.min(talents, ch.talents)} value={betInputAmount || ''} onChange={(e) => setBetInputAmount(Math.min(ch.talents, Math.max(0, Number(e.target.value) || 0)))} placeholder="걸 금액" className="w-24 px-3 py-2 border-2 border-amber-200 rounded-xl font-bold" />
+                              <button onClick={() => { const amt = Math.min(talents, ch.talents, Math.max(1, betInputAmount || 0)); if (talents < amt) return; setTalents(prev => prev - amt); setPendingBetChallengeId(ch.id); setPendingBetAmount(amt); setBetInputAmount(0); }} className="px-6 py-3 bg-amber-500 text-white rounded-2xl font-black hover:bg-amber-600">도전하기</button>
+                            </div>
+                          )}
+                        </div>
+                      )}
                     </div>
                   );
                 })}
@@ -850,6 +1544,7 @@ const App: React.FC = () => {
                   <div className="text-left">
                     <h3 className="text-3xl font-black mb-2 tracking-tight">교리퀴즈 전체 도전</h3>
                     <p className="font-bold opacity-90 text-amber-50 text-lg">모든 주제의 문제를 랜덤하게 풀어보세요!</p>
+                    <p className="mt-1 font-black text-amber-100 text-sm">완료 시 5 달란트</p>
                   </div>
                 </div>
                 <div className="flex items-center gap-3 bg-white/20 px-8 py-4 rounded-[28px] font-black text-xl backdrop-blur-md border border-white/30 relative z-10 group-hover:bg-white group-hover:text-amber-600 transition-all shadow-lg">
@@ -857,7 +1552,7 @@ const App: React.FC = () => {
                 </div>
               </button>
 
-              <div className="grid grid-cols-1 gap-6 md:grid-cols-2 lg:grid-cols-3">
+              <div className={`grid gap-6 ${previewGridCols ?? 'grid-cols-1 md:grid-cols-2 lg:grid-cols-3'}`}>
                 {THEOLOGY_TOPICS.map((topic) => (
                   <button key={topic.id} onClick={() => setSelectedTopic(topic)} className="relative flex flex-col items-center gap-4 p-8 transition-all duration-300 bg-white border-2 border-transparent group rounded-[40px] shadow-lg hover:shadow-2xl hover:border-sky-200 overflow-hidden text-center">
                     <div className={`p-6 rounded-3xl ${topic.color} text-white group-hover:scale-110 transition-transform shadow-lg shadow-sky-100`}><topic.Icon className="w-10 h-10" /></div>
@@ -865,6 +1560,10 @@ const App: React.FC = () => {
                     <div className="absolute top-0 right-0 p-4 transition-opacity opacity-5 group-hover:opacity-10"><topic.Icon className="w-16 h-16" /></div>
                   </button>
                 ))}
+                <button onClick={() => { setSelectedChallengeRoom(true); setSelectedTopic(null); }} className="relative flex flex-col items-center gap-4 p-8 transition-all duration-300 bg-amber-500 border-2 border-transparent group rounded-[40px] shadow-lg hover:shadow-2xl hover:bg-amber-600 overflow-hidden text-center">
+                  <div className="p-6 rounded-3xl bg-amber-400 text-white group-hover:scale-110 transition-transform shadow-lg"><Trophy className="w-10 h-10" /></div>
+                  <div><h3 className="text-xl font-black text-white">챌린지 방</h3><p className="text-xs font-bold text-amber-100 tracking-widest uppercase mt-1">게임·성경·카톡으로 달란트 모으기</p></div>
+                </button>
                 <button onClick={handleTeacherLoungeClick} className="relative flex flex-col items-center gap-4 p-8 transition-all duration-300 bg-slate-800 border-2 border-transparent group rounded-[40px] shadow-lg hover:shadow-2xl hover:bg-slate-900 overflow-hidden text-center">
                   <div className="p-6 rounded-3xl bg-slate-600 text-white group-hover:scale-110 transition-transform shadow-lg">{isTeacherAuthenticated ? <Library className="w-10 h-10" /> : <Lock className="w-10 h-10" />}</div>
                   <div><h3 className="text-xl font-black text-white">교사 전용실</h3><p className="text-xs font-bold text-slate-400 tracking-widest uppercase mt-1">자료 관리 & 스테이션</p></div>
@@ -874,44 +1573,95 @@ const App: React.FC = () => {
             </div>
           )
         ) : activeTab === 'teacher' ? (
-          <div className="space-y-8 animate-in fade-in duration-500">
-            {!selectedTeacherCategory ? (
-              <>
-                <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-                  <div className="flex items-center gap-4"><button onClick={resetView} className="p-3 bg-white rounded-2xl shadow-sm hover:bg-slate-50 transition-colors"><ChevronLeft className="w-6 h-6" /></button><div><h2 className="text-3xl font-black text-slate-800">드림 교사 라운지</h2><p className="text-slate-400 font-bold text-sm">성경학교 준비를 위한 자료실입니다.</p></div></div>
-                  <button onClick={() => { setIsTeacherAuthenticated(false); resetView(); }} className="p-4 bg-slate-800 text-white rounded-2xl shadow-lg hover:bg-slate-900 transition-all flex items-center gap-2 font-bold"><Lock className="w-5 h-5" /> 라운지 잠금</button>
+          <div className="flex flex-col md:flex-row gap-6 animate-in fade-in duration-500">
+            <aside className="md:w-64 shrink-0 flex flex-col gap-4">
+              <div className="flex items-center justify-between gap-2">
+                <button onClick={resetView} className="p-3 bg-white rounded-2xl shadow-sm hover:bg-slate-50 transition-colors"><ChevronLeft className="w-6 h-6" /></button>
+                <button onClick={() => { setIsTeacherAuthenticated(false); setIsAdmin(false); resetView(); }} className="p-3 bg-slate-800 text-white rounded-2xl shadow-sm hover:bg-slate-900 transition-all flex items-center gap-2 font-bold text-sm"><Lock className="w-4 h-4" /> 잠금</button>
+              </div>
+              <div className="mb-2">
+                <h2 className="text-xl font-black text-slate-800">드림 교사 라운지</h2>
+                <p className="text-slate-400 font-bold text-xs mt-0.5">메뉴를 선택하세요</p>
+              </div>
+              <nav className="flex md:flex-col gap-2 overflow-x-auto md:overflow-visible pb-2 md:pb-0 scrollbar-hide">
+                {TEACHER_CATEGORIES.map((cat) => (
+                  <button key={cat.id} onClick={() => setSelectedTeacherCategory(cat)} className={`flex items-center gap-3 px-4 py-3 rounded-2xl text-left transition-all shrink-0 md:shrink-none font-bold ${selectedTeacherCategory?.id === cat.id ? 'bg-slate-800 text-white shadow-lg' : 'bg-white border-2 border-slate-100 hover:border-slate-200 text-slate-700'}`}>
+                    <div className={`p-2 rounded-xl ${selectedTeacherCategory?.id === cat.id ? 'bg-white/20' : cat.color} ${selectedTeacherCategory?.id === cat.id ? 'text-white' : 'text-white'}`}><cat.Icon className="w-5 h-5" /></div>
+                    <span className="text-sm">{cat.name}</span>
+                  </button>
+                ))}
+              </nav>
+            </aside>
+            <main className="flex-1 min-w-0">
+              {!selectedTeacherCategory ? (
+                <div className="flex flex-col items-center justify-center py-24 bg-white rounded-[40px] border-4 border-dashed border-slate-100 text-center px-6">
+                  <Library className="w-16 h-16 text-slate-200 mb-4" />
+                  <p className="text-slate-400 font-bold text-lg">왼쪽 메뉴에서 항목을 선택하세요.</p>
                 </div>
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                  {TEACHER_CATEGORIES.map((cat) => (
-                    <button key={cat.id} onClick={() => setSelectedTeacherCategory(cat)} className="relative flex flex-col items-start gap-6 p-8 text-left transition-all duration-300 bg-white border-2 border-transparent group rounded-[40px] shadow-lg hover:shadow-2xl hover:border-slate-200 overflow-hidden">
-                      <div className={`p-5 rounded-3xl ${cat.color} text-white group-hover:scale-110 transition-transform shadow-lg`}><cat.Icon className="w-8 h-8" /></div>
-                      <div className="space-y-2"><h3 className="text-xl font-black text-slate-800 leading-tight">{cat.name}</h3><p className="text-sm font-bold text-slate-400">{cat.description}</p></div>
-                      <div className="absolute top-0 right-0 p-4 transition-opacity opacity-5 group-hover:opacity-10"><cat.Icon className="w-20 h-20" /></div>
-                    </button>
-                  ))}
-                </div>
-              </>
-            ) : (
-              <div className="space-y-8 animate-in slide-in-from-right-10 duration-500">
-                <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-                  <div className="flex items-center gap-4">
-                    <button onClick={() => setSelectedTeacherCategory(null)} className="p-3 bg-white rounded-2xl shadow-sm hover:bg-slate-50 transition-colors">
-                      <ChevronLeft className="w-6 h-6" />
-                    </button>
-                    <div className="flex items-center gap-3">
-                      <div className={`p-3 rounded-2xl ${selectedTeacherCategory.color} text-white`}>
-                        <selectedTeacherCategory.Icon className="w-6 h-6" />
-                      </div>
-                      <div>
-                        <h2 className="text-2xl font-black text-slate-800">{selectedTeacherCategory.name}</h2>
-                        <p className="text-slate-400 font-bold text-sm">자료를 확인하고 관리하세요.</p>
-                      </div>
+              ) : (
+                <div className="space-y-6 animate-in slide-in-from-right-10 duration-300">
+                  <div className="flex items-center gap-3">
+                    <div className={`p-3 rounded-2xl ${selectedTeacherCategory.color} text-white`}>
+                      <selectedTeacherCategory.Icon className="w-6 h-6" />
+                    </div>
+                    <div>
+                      <h2 className="text-2xl font-black text-slate-800">{selectedTeacherCategory.name}</h2>
+                      <p className="text-slate-400 font-bold text-sm">자료를 확인하고 관리하세요.</p>
                     </div>
                   </div>
-                </div>
 
-                {selectedTeacherCategory.id === 'talent-gifts' ? (
+                {selectedTeacherCategory.id === 'mission-confirm' ? (
+                  <div className="bg-white p-6 sm:p-10 rounded-[40px] shadow-2xl border-4 border-teal-100 space-y-8">
+                    <h4 className="text-xl font-black text-slate-800">오늘의 드림 미션 확인</h4>
+                    <p className="text-slate-600 font-medium text-sm">학생이 완료한 미션을 확인하고 확인 버튼을 누르면 해당 학생에게 3 달란트가 부여됩니다.</p>
+                    {pendingMissionCompletions.length === 0 ? (
+                      <div className="text-center py-16 bg-slate-50/50 rounded-3xl border-2 border-dashed border-slate-100">
+                        <CheckCircle2 className="w-16 h-16 mx-auto text-slate-200 mb-4" />
+                        <p className="text-slate-400 font-bold">대기 중인 미션 완료가 없어요.</p>
+                      </div>
+                    ) : (
+                      <div className="space-y-4 max-h-[400px] overflow-y-auto pr-2 scrollbar-hide">
+                        {pendingMissionCompletions.map((item) => {
+                          const student = students.find(s => s.name === item.studentName);
+                          const classObj = student?.classId ? classes.find(c => c.id === student.classId) : null;
+                          return (
+                            <div key={item.id} className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 p-5 bg-white border-2 border-teal-50 rounded-3xl hover:border-teal-100 transition-all shadow-sm">
+                              <div className="min-w-0 flex-1">
+                                <div className="flex items-center gap-2 flex-wrap">
+                                  <span className="font-black text-lg text-slate-800">{item.studentName}</span>
+                                  <span className="text-sm font-bold text-slate-500 px-2 py-0.5 bg-slate-100 rounded-lg">{classObj?.name ?? '-'}</span>
+                                </div>
+                                <p className="mt-2 text-slate-600 font-medium">{item.topicTitle} – {item.missionText}</p>
+                              </div>
+                              <button onClick={() => confirmMissionCompletion(item.id)} className="shrink-0 px-5 py-2.5 bg-teal-500 text-white rounded-xl font-bold hover:bg-teal-600 transition-colors flex items-center gap-2">
+                                <CheckCircle2 className="w-5 h-5" /> 확인
+                              </button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                ) : selectedTeacherCategory.id === 'talent-gifts' ? (
                   <div className="bg-white p-6 sm:p-10 rounded-[40px] shadow-2xl border-4 border-amber-100 space-y-8">
+                    {loggedInStudents.length > 0 && (
+                      <div className="p-4 bg-sky-50 rounded-2xl border-2 border-sky-100">
+                        <p className="font-black text-slate-700 text-sm mb-2">지금 로그인한 친구들</p>
+                        <div className="flex flex-wrap gap-2">
+                          {loggedInStudents.map(s => (
+                            <span key={s.id} className="px-3 py-1.5 bg-white rounded-xl font-bold text-slate-600 border border-sky-100">{s.name}</span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    <div className="flex gap-2 flex-wrap">
+                      <button type="button" onClick={() => setTalentGiftListMode('loggedIn')} className={`px-4 py-2.5 rounded-xl font-bold text-sm transition-all ${talentGiftListMode === 'loggedIn' ? 'bg-sky-500 text-white shadow-md' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}>
+                        지금 로그인한 친구들
+                      </button>
+                      <button type="button" onClick={() => setTalentGiftListMode('all')} className={`px-4 py-2.5 rounded-xl font-bold text-sm transition-all ${talentGiftListMode === 'all' ? 'bg-amber-500 text-white shadow-md' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}>
+                        전체 반별 분류명단
+                      </button>
+                    </div>
                     <div className="flex flex-col md:flex-row gap-4">
                       <div className="flex-1 flex gap-2">
                         <input 
@@ -931,45 +1681,308 @@ const App: React.FC = () => {
                       </button>
                     </div>
 
+                    {talentGiftListMode === 'all' && (
+                      <div className="flex items-center gap-4 flex-wrap">
+                        <span className="font-black text-slate-600">반 필터:</span>
+                        <select value={selectedClassFilter} onChange={(e) => setSelectedClassFilter(e.target.value)} className="px-4 py-2 bg-slate-50 border-2 border-slate-100 rounded-xl font-bold text-slate-700 focus:border-amber-400 focus:outline-none">
+                          <option value="">전체</option>
+                          {classes.map(c => (<option key={c.id} value={c.id}>{c.name}</option>))}
+                        </select>
+                      </div>
+                    )}
+
                     <div className="space-y-4">
-                      <div className="flex items-center justify-between px-6 py-2 bg-slate-50 rounded-xl text-slate-400 font-black text-sm uppercase tracking-widest">
+                      <div className="flex items-center justify-between px-4 sm:px-6 py-2 bg-slate-50 rounded-xl text-slate-400 font-black text-sm uppercase tracking-widest gap-2">
                         <span>학생 이름</span>
-                        <span className="mr-32">달란트 현황</span>
+                        <span className="shrink-0">반</span>
+                        <span className="shrink-0">달란트 현황</span>
                       </div>
                       <div className="grid gap-3 max-h-[400px] overflow-y-auto pr-2 scrollbar-hide">
-                        {students.length === 0 ? (
+                        {(talentGiftListMode === 'loggedIn'
+                          ? students.filter(s => loggedInStudents.some(l => l.name === s.name))
+                          : (selectedClassFilter ? students.filter(s => s.classId === selectedClassFilter) : students)
+                        ).length === 0 ? (
                           <div className="text-center py-20 bg-slate-50/50 rounded-3xl border-2 border-dashed border-slate-100">
                             <Users className="w-16 h-16 mx-auto text-slate-200 mb-4" />
                             <p className="text-slate-400 font-bold">등록된 학생이 없어요!</p>
                           </div>
                         ) : (
-                          students.map(student => (
-                            <div key={student.id} className="flex items-center justify-between p-5 bg-white border-2 border-slate-50 rounded-3xl hover:border-amber-100 transition-all group shadow-sm">
-                              <div className="flex items-center gap-4">
-                                <div className="w-12 h-12 bg-sky-100 rounded-2xl flex items-center justify-center text-sky-600 font-black text-xl">
-                                  {student.name.charAt(0)}
+                          (talentGiftListMode === 'loggedIn'
+                            ? students.filter(s => loggedInStudents.some(l => l.name === s.name))
+                            : (selectedClassFilter ? students.filter(s => s.classId === selectedClassFilter) : students)
+                          ).map(student => {
+                            const studentClass = classes.find(c => c.id === student.classId);
+                            return (
+                              <div key={student.id} className="flex flex-col sm:flex-row sm:items-center justify-between p-4 sm:p-5 bg-white border-2 border-slate-50 rounded-3xl hover:border-amber-100 transition-all group shadow-sm gap-4">
+                                <div className="flex items-center gap-4 min-w-0">
+                                  <div className="w-12 h-12 bg-sky-100 rounded-2xl flex items-center justify-center text-sky-600 font-black text-xl shrink-0">
+                                    {student.name.charAt(0)}
+                                  </div>
+                                  <span className="font-black text-lg sm:text-xl text-slate-700 truncate">{student.name}</span>
                                 </div>
-                                <span className="font-black text-xl text-slate-700">{student.name}</span>
+                                <div className="flex items-center gap-2 shrink-0">
+                                  {isAdmin ? (
+                                    <>
+                                      <select value={pendingClassAssign?.studentId === student.id ? (pendingClassAssign.classId ?? '') : (student.classId ?? '')} onChange={(e) => setPendingClassAssign({ studentId: student.id, classId: e.target.value || null })} className="px-3 py-2 bg-slate-50 border-2 border-slate-100 rounded-xl font-bold text-slate-700 text-sm focus:border-amber-400 focus:outline-none">
+                                        <option value="">미배정</option>
+                                        {classes.map(c => (<option key={c.id} value={c.id}>{c.name}</option>))}
+                                      </select>
+                                      {pendingClassAssign?.studentId === student.id && (
+                                        <button onClick={() => { assignStudentToClass(pendingClassAssign.studentId, pendingClassAssign.classId); setPendingClassAssign(null); }} className="px-3 py-2 bg-amber-500 text-white rounded-xl font-bold text-sm hover:bg-amber-600">보내기</button>
+                                      )}
+                                    </>
+                                  ) : (
+                                    <span className="font-bold text-slate-600 text-sm px-3 py-1 bg-slate-50 rounded-lg">{studentClass?.name ?? '-'}</span>
+                                  )}
+                                </div>
+                                <div className="flex items-center gap-3 flex-wrap">
+                                  <div className="flex items-center gap-2 px-3 sm:px-4 py-2 bg-amber-50 rounded-2xl border border-amber-100">
+                                    <Coins className="w-5 h-5 text-amber-500 fill-amber-500" />
+                                    <span className="font-black text-amber-700 tabular-nums">{student.talents}</span>
+                                  </div>
+                                  <div className="flex items-center gap-2 flex-wrap">
+                                    <input type="number" min={1} value={giftAmountByStudent[student.id] ?? 1} onChange={(e) => setGiftAmountByStudent(prev => ({ ...prev, [student.id]: Math.max(1, Number(e.target.value) || 1) }))} placeholder="달란트" className="w-14 sm:w-16 px-2 py-2 bg-slate-50 border-2 border-slate-100 rounded-xl font-bold text-slate-700 text-sm focus:border-amber-400 focus:outline-none" />
+                                    <button onClick={() => { const amt = Math.max(1, giftAmountByStudent[student.id] ?? 1); giveTalentToStudent(student.id, amt); }} className="min-w-[3.5rem] px-4 py-2 bg-amber-500 text-white rounded-xl font-bold text-base hover:bg-amber-600">부여</button>
+                                    <button onClick={() => giveTalentToStudent(student.id, 1)} className="p-2 bg-sky-100 text-sky-600 rounded-xl hover:bg-sky-500 hover:text-white transition-all" title="+1 달란트">
+                                      <PlusCircle className="w-6 h-6" />
+                                    </button>
+                                    <button onClick={() => resetStudentTalents(student.id)} className="p-2 bg-slate-100 text-slate-500 rounded-xl hover:bg-slate-300 transition-all font-bold text-xs" title="0으로 초기화">0</button>
+                                    <button onClick={() => deleteStudent(student.id)} className="p-2 bg-red-50 text-red-400 rounded-xl hover:bg-red-500 hover:text-white transition-all">
+                                      <UserMinus className="w-6 h-6" />
+                                    </button>
+                                  </div>
+                                </div>
                               </div>
-                              <div className="flex items-center gap-4">
-                                <div className="flex items-center gap-2 px-4 py-2 bg-amber-50 rounded-2xl border border-amber-100">
-                                  <Coins className="w-5 h-5 text-amber-500 fill-amber-500" />
-                                  <span className="font-black text-amber-700 tabular-nums">{student.talents}</span>
-                                </div>
-                                <div className="flex items-center gap-2">
-                                  <button onClick={() => giveTalentToStudent(student.id, 1)} className="p-2 bg-sky-100 text-sky-600 rounded-xl hover:bg-sky-500 hover:text-white transition-all">
-                                    <PlusCircle className="w-6 h-6" />
-                                  </button>
-                                  <button onClick={() => deleteStudent(student.id)} className="p-2 bg-red-50 text-red-400 rounded-xl hover:bg-red-500 hover:text-white transition-all">
-                                    <UserMinus className="w-6 h-6" />
-                                  </button>
-                                </div>
-                              </div>
-                            </div>
-                          ))
+                            );
+                          })
                         )}
                       </div>
                     </div>
+                  </div>
+                ) : selectedTeacherCategory.id === 'shop-admin' ? (
+                  <div className="bg-white p-6 sm:p-10 rounded-[40px] shadow-2xl border-4 border-emerald-100 space-y-8">
+                    <div className="flex flex-col sm:flex-row gap-4 flex-wrap">
+                      <input type="text" value={newShopItemName} onChange={(e) => setNewShopItemName(e.target.value)} placeholder="아이템 이름" className="flex-1 min-w-[120px] px-4 py-3 bg-slate-50 border-2 border-slate-100 rounded-2xl font-bold focus:border-emerald-400 focus:outline-none" />
+                      <input type="text" value={newShopItemIcon} onChange={(e) => setNewShopItemIcon(e.target.value)} placeholder="이모지 (예: ⭐)" className="w-24 px-4 py-3 bg-slate-50 border-2 border-slate-100 rounded-2xl font-bold text-center focus:border-emerald-400 focus:outline-none" />
+                      <input type="number" min={0} value={newShopItemPrice} onChange={(e) => setNewShopItemPrice(Number(e.target.value) || 0)} placeholder="가격" className="w-28 px-4 py-3 bg-slate-50 border-2 border-slate-100 rounded-2xl font-bold focus:border-emerald-400 focus:outline-none" />
+                      <button onClick={() => { addShopItem(newShopItemName, newShopItemIcon, newShopItemPrice); setNewShopItemName(''); setNewShopItemIcon('⭐'); setNewShopItemPrice(30); }} className="px-6 py-3 bg-emerald-500 text-white rounded-2xl font-black hover:bg-emerald-600 transition-all flex items-center gap-2">
+                        <PlusCircle className="w-5 h-5" /> 추가
+                      </button>
+                    </div>
+                    <div className="space-y-3 max-h-[400px] overflow-y-auto scrollbar-hide">
+                      {shopItems.length === 0 ? (
+                        <div className="text-center py-12 bg-slate-50/50 rounded-3xl border-2 border-dashed border-slate-100 text-slate-400 font-bold">등록된 상점 아이템이 없어요. 위에서 추가해 주세요.</div>
+                      ) : (
+                        shopItems.map(item => (
+                          <div key={item.id} className="flex items-center justify-between p-4 bg-white border-2 border-slate-50 rounded-2xl hover:border-emerald-100 transition-all gap-4">
+                            {editingShopItemId === item.id ? (
+                              <>
+                                <input type="text" value={editShopName} onChange={(e) => setEditShopName(e.target.value)} className="flex-1 px-3 py-2 border rounded-xl font-bold" />
+                                <input type="text" value={editShopIcon} onChange={(e) => setEditShopIcon(e.target.value)} className="w-16 px-2 py-2 border rounded-xl text-center" />
+                                <input type="number" min={0} value={editShopPrice} onChange={(e) => setEditShopPrice(Number(e.target.value) || 0)} className="w-20 px-2 py-2 border rounded-xl font-bold" />
+                                <button onClick={saveEditShopItem} className="px-4 py-2 bg-emerald-500 text-white rounded-xl font-bold text-sm">저장</button>
+                                <button onClick={() => setEditingShopItemId(null)} className="px-4 py-2 bg-slate-200 rounded-xl font-bold text-sm">취소</button>
+                              </>
+                            ) : (
+                              <>
+                                <span className="text-2xl">{item.icon}</span>
+                                <span className="flex-1 font-black text-slate-700">{item.name}</span>
+                                <span className="font-black text-amber-600">{item.price} 달란트</span>
+                                {isAdmin && (
+                                  <>
+                                    <button onClick={() => startEditShopItem(item)} className="p-2 bg-slate-100 text-slate-600 rounded-xl hover:bg-slate-200 text-sm font-bold">수정</button>
+                                    <button onClick={() => deleteShopItem(item.id)} className="p-2 bg-red-50 text-red-400 rounded-xl hover:bg-red-500 hover:text-white transition-all"><Trash2 className="w-4 h-4" /></button>
+                                  </>
+                                )}
+                              </>
+                            )}
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </div>
+                ) : selectedTeacherCategory.id === 'logged-in-students' ? (
+                  <div className="bg-white p-6 sm:p-10 rounded-[40px] shadow-2xl border-4 border-sky-100 space-y-6">
+                    <h4 className="text-xl font-black text-slate-800">로그인한 학생 명단</h4>
+                    {loggedInStudents.length === 0 ? (
+                      <div className="text-center py-16 bg-slate-50/50 rounded-3xl border-2 border-dashed border-slate-100">
+                        <Users className="w-16 h-16 mx-auto text-slate-200 mb-4" />
+                        <p className="text-slate-400 font-bold">Supabase 연동 후, 로그인한 학생 목록이 여기에 표시됩니다.</p>
+                      </div>
+                    ) : (
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-left">
+                          <thead>
+                            <tr className="border-b-2 border-slate-100">
+                              <th className="py-3 px-4 font-black text-slate-600">이름</th>
+                              <th className="py-3 px-4 font-black text-slate-600">로그인 시각</th>
+                              <th className="py-3 px-4 font-black text-slate-600">반</th>
+                              <th className="py-3 px-4 font-black text-slate-600">달란트</th>
+                              {isAdmin && <th className="py-3 px-4 font-black text-slate-600">차단</th>}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {loggedInStudents.map(s => {
+                              const matched = students.find(st => st.name === s.name);
+                              const classObj = matched?.classId ? classes.find(c => c.id === matched.classId) : null;
+                              const isBlocked = blockedStudentIds.includes(s.id);
+                              return (
+                                <tr key={s.id} className={`border-b border-slate-50 ${isBlocked ? 'bg-red-50/50' : ''}`}>
+                                  <td className="py-3 px-4 font-bold text-slate-800">{s.name}</td>
+                                  <td className="py-3 px-4 text-slate-500 font-medium">{s.loggedInAt ?? '-'}</td>
+                                  <td className="py-3 px-4 font-bold text-slate-600">{classObj?.name ?? '-'}</td>
+                                  <td className="py-3 px-4 font-black text-amber-600 tabular-nums">{matched != null ? matched.talents : '-'}</td>
+                                  {isAdmin && (
+                                    <td className="py-3 px-4">
+                                      <button type="button" onClick={() => toggleBlockStudent(s.id)} className={`px-3 py-1.5 rounded-xl font-bold text-sm ${isBlocked ? 'bg-green-100 text-green-700 hover:bg-green-200' : 'bg-red-100 text-red-700 hover:bg-red-200'}`}>
+                                        {isBlocked ? '차단 해제' : '차단'}
+                                      </button>
+                                    </td>
+                                  )}
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+                ) : selectedTeacherCategory.id === 'class-management' ? (
+                  <div className="bg-white p-6 sm:p-10 rounded-[40px] shadow-2xl border-4 border-violet-100 space-y-8">
+                    {loggedInStudents.length > 0 && (
+                      <div className="p-4 bg-sky-50 rounded-2xl border-2 border-sky-100">
+                        <p className="font-black text-slate-700 text-sm mb-2">지금 로그인한 친구들</p>
+                        <div className="flex flex-wrap gap-2">
+                          {loggedInStudents.map(s => (
+                            <span key={s.id} className="px-3 py-1.5 bg-white rounded-xl font-bold text-slate-600 border border-sky-100">{s.name}</span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    {(() => {
+                      const unassignedLoggedIn = loggedInStudents.filter(s => {
+                        const st = students.find(st => st.name === s.name);
+                        return !st || st.classId == null || st.classId === '';
+                      });
+                      return unassignedLoggedIn.length > 0 ? (
+                        <div className="p-4 bg-amber-50 rounded-2xl border-2 border-amber-100">
+                          <p className="font-black text-slate-700 text-sm mb-2">반에 아직 배정되지 않은 로그인 친구들</p>
+                          {classes.length === 0 ? (
+                            <p className="text-slate-500 text-sm font-medium">반을 먼저 추가해 주세요.</p>
+                          ) : (
+                            <div className="space-y-3">
+                              {unassignedLoggedIn.map(s => {
+                                const selectedId = unassignedSelectedClassId[s.id] ?? '';
+                                return (
+                                  <div key={s.id} className="flex flex-wrap items-center gap-2 p-3 bg-white rounded-xl border border-amber-200">
+                                    <span className="font-bold text-amber-800">{s.name}</span>
+                                    <select value={selectedId} onChange={(e) => setUnassignedSelectedClassId(prev => ({ ...prev, [s.id]: e.target.value }))} className="px-3 py-2 bg-slate-50 border-2 border-slate-100 rounded-xl font-bold text-slate-700 text-sm focus:border-violet-400 focus:outline-none">
+                                      <option value="">반 선택</option>
+                                      {classes.map(c => (<option key={c.id} value={c.id}>{c.name}</option>))}
+                                    </select>
+                                    <button onClick={() => { if (selectedId) { assignUnassignedToClass(s.name, selectedId); setUnassignedSelectedClassId(prev => { const next = { ...prev }; delete next[s.id]; return next; }); } }} disabled={!selectedId} className="px-4 py-2 bg-violet-500 text-white rounded-xl font-bold text-sm hover:bg-violet-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors">배정</button>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          )}
+                        </div>
+                      ) : null;
+                    })()}
+                    <h4 className="text-xl font-black text-slate-800">반 목록</h4>
+                    {isAdmin && (
+                      <div className="flex gap-2 flex-wrap">
+                        <input type="text" value={newClassName} onChange={(e) => setNewClassName(e.target.value)} placeholder="반 이름 (예: 1반)" className="flex-1 min-w-[120px] px-4 py-3 bg-slate-50 border-2 border-slate-100 rounded-2xl font-bold focus:border-violet-400 focus:outline-none" />
+                        <button onClick={() => { addClass(newClassName); setNewClassName(''); }} className="px-6 py-3 bg-violet-500 text-white rounded-2xl font-black hover:bg-violet-600 transition-all flex items-center gap-2">
+                          <Plus className="w-5 h-5" /> 추가
+                        </button>
+                      </div>
+                    )}
+                    <div className="grid gap-3">
+                      {classes.length === 0 ? (
+                        <div className="text-center py-12 bg-slate-50/50 rounded-3xl border-2 border-dashed border-slate-100 text-slate-400 font-bold">등록된 반이 없어요. {isAdmin ? '위에서 반을 추가해 주세요.' : '관리자가 반을 추가하면 여기에 표시됩니다.'}</div>
+                      ) : (
+                        classes.map(c => (
+                          <div key={c.id} className="flex items-center justify-between p-4 bg-white border-2 border-slate-50 rounded-2xl hover:border-violet-100 transition-all gap-4">
+                            {editingClassId === c.id && isAdmin ? (
+                              <>
+                                <input type="text" value={editClassName} onChange={(e) => setEditClassName(e.target.value)} className="flex-1 px-4 py-2 border-2 border-violet-200 rounded-xl font-bold" />
+                                <button onClick={() => { updateClass(c.id, editClassName); setEditingClassId(null); setEditClassName(''); }} className="px-4 py-2 bg-violet-500 text-white rounded-xl font-bold text-sm">저장</button>
+                                <button onClick={() => { setEditingClassId(null); setEditClassName(''); }} className="px-4 py-2 bg-slate-200 rounded-xl font-bold text-sm">취소</button>
+                              </>
+                            ) : (
+                              <>
+                                <span className="font-black text-slate-700">{c.name}</span>
+                                {isAdmin && (
+                                  <div className="flex items-center gap-2">
+                                    <button onClick={() => { setEditingClassId(c.id); setEditClassName(c.name); }} className="p-2 bg-slate-100 text-slate-600 rounded-xl hover:bg-violet-100 text-sm font-bold"><Pencil className="w-4 h-4" /></button>
+                                    <button onClick={() => deleteClass(c.id)} className="p-2 bg-red-50 text-red-400 rounded-xl hover:bg-red-500 hover:text-white transition-all"><Trash2 className="w-4 h-4" /></button>
+                                  </div>
+                                )}
+                              </>
+                            )}
+                          </div>
+                        ))
+                      )}
+                    </div>
+                    {isAdmin && students.length > 0 && (
+                      <div className="pt-6 border-t border-slate-100 space-y-4">
+                        <h4 className="text-lg font-black text-slate-800">학생 반 배정</h4>
+                        <div className="grid gap-3 max-h-[280px] overflow-y-auto scrollbar-hide">
+                          {students.map(s => (
+                            <div key={s.id} className="flex items-center justify-between p-3 bg-slate-50 rounded-xl gap-4">
+                              <span className="font-bold text-slate-700">{s.name}</span>
+                              <div className="flex items-center gap-2">
+                                <select value={pendingClassAssign?.studentId === s.id ? (pendingClassAssign.classId ?? '') : (s.classId ?? '')} onChange={(e) => setPendingClassAssign({ studentId: s.id, classId: e.target.value || null })} className="px-3 py-2 bg-white border-2 border-slate-100 rounded-xl font-bold text-slate-700 focus:border-violet-400 focus:outline-none">
+                                  <option value="">미배정</option>
+                                  {classes.map(cl => (<option key={cl.id} value={cl.id}>{cl.name}</option>))}
+                                </select>
+                                {pendingClassAssign?.studentId === s.id && (
+                                  <button onClick={() => { assignStudentToClass(pendingClassAssign.studentId, pendingClassAssign.classId); setPendingClassAssign(null); }} className="px-3 py-2 bg-violet-500 text-white rounded-xl font-bold text-sm hover:bg-violet-600">확인</button>
+                                )}
+                                <button onClick={() => { if (pendingClassAssign?.studentId === s.id) setPendingClassAssign(null); deleteStudent(s.id); }} className="p-2 bg-red-50 text-red-400 rounded-xl hover:bg-red-500 hover:text-white transition-all" title="명단에서 삭제"><UserMinus className="w-5 h-5" /></button>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                ) : MATERIAL_CATEGORY_IDS.includes(selectedTeacherCategory.id) ? (
+                  <div className="bg-white p-6 sm:p-10 rounded-[40px] shadow-2xl border-4 border-slate-100 space-y-6">
+                    <input ref={materialFileInputRef} type="file" accept=".pdf,.ppt,.pptx,.doc,.docx,.hwp,image/*" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) uploadMaterial(selectedTeacherCategory.id, f); e.target.value = ''; }} />
+                    <div className="flex items-center justify-between flex-wrap gap-4">
+                      <h4 className="text-xl font-black text-slate-800">다운로드할 자료</h4>
+                      {isAdmin && (
+                        <button onClick={() => materialFileInputRef.current?.click()} className="px-6 py-3 bg-sky-500 text-white rounded-2xl font-black hover:bg-sky-600 transition-all flex items-center gap-2">
+                          <CloudUpload className="w-5 h-5" /> 자료 올리기
+                        </button>
+                      )}
+                    </div>
+                    {(materialsList[selectedTeacherCategory.id] || []).length === 0 ? (
+                      <div className="text-center py-16 bg-slate-50/50 rounded-3xl border-2 border-dashed border-slate-100">
+                        <FileText className="w-16 h-16 mx-auto text-slate-200 mb-4" />
+                        <p className="text-slate-400 font-bold">등록된 자료가 없어요. public/materials/ 폴더에 파일을 넣고 materials.json을 수정한 뒤 배포해 주세요.</p>
+                      </div>
+                    ) : (
+                      <div className="grid gap-3">
+                        {(materialsList[selectedTeacherCategory.id] || []).map((m, i) => (
+                          <div key={i} className="flex items-center justify-between gap-4 p-4 bg-slate-50 hover:bg-sky-50 border-2 border-slate-100 hover:border-sky-200 rounded-2xl font-bold text-slate-700 transition-all">
+                            <span className="flex-1 min-w-0 truncate">{m.name}</span>
+                            <div className="flex items-center gap-2 shrink-0">
+                              <a href={m.file.startsWith('blob:') ? m.file : `/materials/${m.file}`} download={m.name} className="inline-flex items-center gap-2 px-4 py-2 bg-sky-500 text-white rounded-xl font-black hover:bg-sky-600 transition-all">
+                                <Download className="w-5 h-5" /> 다운로드
+                              </a>
+                              {isAdmin && (
+                                <button onClick={() => deleteMaterial(selectedTeacherCategory.id, i)} className="p-2 bg-red-50 text-red-400 rounded-xl hover:bg-red-500 hover:text-white transition-all shrink-0" title="삭제">
+                                  <Trash2 className="w-5 h-5" />
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 ) : (
                   <div className="bg-white p-20 rounded-[40px] border-4 border-dashed border-slate-100 flex flex-col items-center justify-center text-center space-y-4">
@@ -982,8 +1995,9 @@ const App: React.FC = () => {
                     </div>
                   </div>
                 )}
-              </div>
-            )}
+                </div>
+              )}
+            </main>
           </div>
         ) : (
           <div className="space-y-6 animate-in slide-in-from-bottom-10 duration-500">
@@ -1007,7 +2021,7 @@ const App: React.FC = () => {
                   <div className="p-8 space-y-8 bg-white border shadow-2xl rounded-[40px] border-sky-50">
                     <div className="p-8 border-l-8 bg-amber-50 rounded-3xl border-amber-400 relative overflow-hidden"><Star className="absolute -top-4 -right-4 w-16 h-16 text-amber-200 fill-amber-100 opacity-50" /><h4 className="flex items-center gap-2 mb-3 font-black text-amber-800 text-lg uppercase tracking-wider"><Award className="w-6 h-6" /> 오늘의 보석 말씀</h4><p className="text-2xl font-bold italic leading-relaxed text-amber-900">"{selectedTopic?.verse}"</p></div>
                     <div className="space-y-4"><h4 className="text-2xl font-black text-slate-800 flex items-center gap-2"><BookOpen className="w-6 h-6 text-sky-500" /> 어떤 내용인가요?</h4><p className="text-xl leading-relaxed text-slate-600 font-medium whitespace-pre-wrap">{selectedTopic?.coreContent}</p></div>
-                    <button onClick={() => startQuiz(selectedTopic?.id)} className="w-full mt-6 py-6 bg-amber-400 text-white rounded-[32px] font-black text-2xl shadow-lg shadow-amber-100 hover:bg-amber-500 transition-all flex items-center justify-center gap-3 active:scale-95"><Trophy className="w-8 h-8" /> 이 주제 퀴즈 도전하기!</button>
+                    <button onClick={() => startQuiz(selectedTopic?.id)} className="w-full mt-6 py-6 bg-amber-400 text-white rounded-[32px] font-black text-2xl shadow-lg shadow-amber-100 hover:bg-amber-500 transition-all flex flex-col items-center justify-center gap-1 active:scale-95"><span className="flex items-center gap-3"><Trophy className="w-8 h-8" /> 이 주제 퀴즈 도전하기!</span><span className="text-sm font-bold text-amber-100">완료 시 1 달란트</span></button>
                   </div>
                 </div>
               )}
@@ -1021,7 +2035,7 @@ const App: React.FC = () => {
                   <div className="p-8 space-y-8 bg-white border shadow-2xl rounded-[40px] border-sky-50">
                     <div className="space-y-4"><h4 className="text-2xl font-black text-slate-800 flex items-center gap-2"><Heart className="w-6 h-6 text-red-500" /> 나에게 주는 의미</h4><p className="text-xl leading-relaxed text-slate-600 font-medium whitespace-pre-wrap">{selectedTopic?.meaningContent}</p></div>
                     <div className="pt-6 space-y-6 border-t border-slate-100">
-                      <div className="flex items-center justify-between"><h4 className="text-2xl font-black text-slate-800 flex items-center gap-2"><Gamepad2 className="w-6 h-6 text-sky-500" /> 오늘의 드림 미션!</h4><div className="text-sm font-black text-amber-600 bg-amber-100 px-4 py-2 rounded-full border border-amber-200 shadow-sm flex items-center gap-1"><Coins className="w-4 h-4 fill-amber-500 text-amber-500" /> 완료 시 3 달란트</div></div>
+                      <div className="flex items-center justify-between"><h4 className="text-2xl font-black text-slate-800 flex items-center gap-2"><Gamepad2 className="w-6 h-6 text-sky-500" /> 오늘의 드림 미션!</h4><div className="text-sm font-black text-amber-600 bg-amber-100 px-4 py-2 rounded-full border border-amber-200 shadow-sm flex items-center gap-1"><Coins className="w-4 h-4 fill-amber-500 text-amber-500" /> 선생님 확인 후 3 달란트</div></div>
                       <div className="grid gap-4">
                         {selectedTopic?.missions.map((m, i) => {
                           const missionId = `${selectedTopic?.id}-m-${i}`;
