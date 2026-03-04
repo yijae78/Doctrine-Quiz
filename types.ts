@@ -69,3 +69,14 @@ export type PendingMissionCompletion = {
 };
 
 export type Teacher = { id: string; name: string; kakaoLink: string };
+
+export type ChurchConfig = {
+  churchName: string;
+  departmentName: string;
+  eventName: string;
+  teacherPassword: string;
+  adminPassword: string;
+  currencyName: string;
+  initialCurrency: number;
+  firstLoginBonus: number;
+};

@@ -1,7 +1,7 @@
 /// <reference types="vite/client" />
 import React, { useState, useEffect, useRef } from 'react';
 import { createRoot } from 'react-dom/client';
-import type { Topic, QuizQuestion, TeacherCategory, Class, LoggedInStudent, Student, ShopItem, Challenge, PendingMissionCompletion, Teacher } from './types';
+import type { Topic, QuizQuestion, TeacherCategory, Class, LoggedInStudent, Student, ShopItem, Challenge, PendingMissionCompletion, Teacher, ChurchConfig } from './types';
 import { 
   BookOpen, 
   Sun, 
@@ -52,7 +52,8 @@ import {
   Home,
   Loader2,
   PlusCircle,
-  UserMinus
+  UserMinus,
+  Settings
 } from 'lucide-react';
 
 // 성경 본문 데이터셋 (오프라인 환경 및 성능 최적화를 위해 로컬에 포함)
@@ -101,16 +102,49 @@ const BIBLE_DATASET: Record<string, string> = {
   "벧후 3:11": "이 모든 것이 이렇게 풀어지리니 너희가 어떠한 사람이 되어야 마땅하냐 거룩한 행실과 경건함으로"
 };
 
-const TEACHER_PW = '1004';
-const ADMIN_PW = '0220';
+// ── 교회 설정 (범용) ──
+const DEFAULT_CHURCH_CONFIG: ChurchConfig = {
+  churchName: '',
+  departmentName: '',
+  eventName: '',
+  teacherPassword: '1004',
+  adminPassword: '0220',
+  currencyName: '달란트',
+  initialCurrency: 100,
+  firstLoginBonus: 5,
+};
+
+function loadChurchConfig(): ChurchConfig {
+  const saved = localStorage.getItem('church_config');
+  if (saved) {
+    try { return { ...DEFAULT_CHURCH_CONFIG, ...JSON.parse(saved) }; } catch { /* ignore */ }
+  }
+  return DEFAULT_CHURCH_CONFIG;
+}
+
+function saveChurchConfig(config: ChurchConfig) {
+  localStorage.setItem('church_config', JSON.stringify(config));
+}
+
+function loadTeachers(): Teacher[] {
+  const saved = localStorage.getItem('church_teachers');
+  if (saved) {
+    try { return JSON.parse(saved); } catch { /* ignore */ }
+  }
+  return [];
+}
+
+function saveTeachers(teachers: Teacher[]) {
+  localStorage.setItem('church_teachers', JSON.stringify(teachers));
+}
 
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL ?? '';
 const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY ?? '';
 
-/** Supabase 연동 시 교체 포인트: fetchLoggedInStudents, dream_logged_in_students, dream_students, dream_classes, dream_pending_missions, dream_challenges, dream_completed_challenges, dream_talents 등 각 localStorage 키를 Supabase 테이블/함수로 교체. */
+/** Supabase 연동 시 교체 포인트: fetchLoggedInStudents, church_logged_in_students, church_students, church_classes, church_pending_missions, church_challenges, church_completed_challenges, church_talents 등 각 localStorage 키를 Supabase 테이블/함수로 교체. */
 
 async function fetchLoggedInStudents(): Promise<LoggedInStudent[]> {
-  const saved = localStorage.getItem('dream_logged_in_students');
+  const saved = localStorage.getItem('church_logged_in_students');
   return saved ? JSON.parse(saved) : [];
 }
 
@@ -150,10 +184,7 @@ const DEFAULT_CHALLENGES: Challenge[] = [
   { id: 'ch-bet', title: '달란트 2배 도전', description: '달란트를 걸고 완료하면 2배로 받아요! (최대 1 달란트)', talents: 1, type: 'bet' },
 ];
 
-const TEACHERS: Teacher[] = [
-  { id: 't1', name: '선생님 1', kakaoLink: 'https://open.kakao.com/o/sample' },
-  { id: 't2', name: '선생님 2', kakaoLink: 'https://open.kakao.com/o/sample' },
-];
+// 선생님 목록은 관리자 설정에서 동적으로 관리 (localStorage: church_teachers)
 
 const THEOLOGY_TOPICS: Topic[] = [
   {
@@ -333,11 +364,12 @@ const TEACHER_CATEGORIES: TeacherCategory[] = [
   { id: 'teacher-workbook', name: '학생용 활동지', Icon: Pencil, color: 'bg-indigo-600', description: '학생들의 참여를 이끄는 워크북 자료' },
   { id: 'slides', name: '교육용 PPT', Icon: Presentation, color: 'bg-orange-500', description: '예배 및 공과 시간에 활용하는 시각 자료' },
   { id: 'corner-learning', name: '코너학습 가이드', Icon: Gamepad2, color: 'bg-rose-500', description: '교육 테마별 활동 매뉴얼' },
-  { id: 'talent-gifts', name: '달란트 선물 명단', Icon: Gift, color: 'bg-amber-500', description: '학생별 달란트 관리 및 시상 현황' },
-  { id: 'shop-admin', name: '달란트 상점 관리', Icon: ShoppingBag, color: 'bg-emerald-600', description: '상점 아이템 추가 및 가격 설정' },
-  { id: 'mission-confirm', name: '오늘의 드림 미션 확인', Icon: CheckCircle2, color: 'bg-teal-600', description: '학생이 한 미션을 확인하고 달란트 부여' },
+  { id: 'talent-gifts', name: '보상 선물 명단', Icon: Gift, color: 'bg-amber-500', description: '학생별 보상 관리 및 시상 현황' },
+  { id: 'shop-admin', name: '상점 관리', Icon: ShoppingBag, color: 'bg-emerald-600', description: '상점 아이템 추가 및 가격 설정' },
+  { id: 'mission-confirm', name: '오늘의 미션 확인', Icon: CheckCircle2, color: 'bg-teal-600', description: '학생이 한 미션을 확인하고 보상 부여' },
   { id: 'logged-in-students', name: '로그인한 학생 명단', Icon: Users, color: 'bg-sky-600', description: 'Supabase 연동 후 로그인한 학생 목록' },
   { id: 'class-management', name: '반별 관리', Icon: Map, color: 'bg-violet-600', description: '반 생성 및 학생 반 배정' },
+  { id: 'church-settings', name: '교회 설정', Icon: Settings, color: 'bg-gray-600', description: '교회명, 비밀번호, 선생님 관리' },
 ];
 
 const STICKERS = [
@@ -359,10 +391,40 @@ const CLASS_COLORS: { bg: string; text: string; border: string; borderL: string;
 const DEFAULT_CLASS_COLOR = { bg: 'bg-slate-500', text: 'text-white', border: 'border-slate-600', borderL: 'border-l-slate-600', light: 'bg-slate-50' };
 
 const App: React.FC = () => {
-  const [userName, setUserName] = useState<string>(() => localStorage.getItem('dream_user_name') || '');
+  // ── 교회 설정 & 선생님 목록 ──
+  const [churchConfig, setChurchConfig] = useState<ChurchConfig>(loadChurchConfig);
+  const [teachers, setTeachersState] = useState<Teacher[]>(loadTeachers);
+  const [showSetupWizard, setShowSetupWizard] = useState<boolean>(() => !localStorage.getItem('church_config'));
+  const [setupStep, setSetupStep] = useState(0);
+  const [setupConfig, setSetupConfig] = useState<ChurchConfig>({ ...DEFAULT_CHURCH_CONFIG });
+
+  const updateChurchConfig = (newConfig: ChurchConfig) => {
+    setChurchConfig(newConfig);
+    saveChurchConfig(newConfig);
+  };
+
+  const updateTeachers = (newTeachers: Teacher[]) => {
+    setTeachersState(newTeachers);
+    saveTeachers(newTeachers);
+  };
+
+  // 동적 타이틀 반영
+  useEffect(() => {
+    const parts = [churchConfig.departmentName, churchConfig.eventName].filter(Boolean);
+    document.title = parts.length > 0 ? parts.join(' ') : '교회 교육 앱';
+  }, [churchConfig.departmentName, churchConfig.eventName]);
+
+  const getDisplayTitle = () => {
+    if (churchConfig.departmentName || churchConfig.eventName) {
+      return { line1: churchConfig.departmentName || '교회 교육부', line2: churchConfig.eventName || '교리성경공부' };
+    }
+    return { line1: '교회 교육부', line2: '교리성경공부' };
+  };
+
+  const [userName, setUserName] = useState<string>(() => localStorage.getItem('church_user_name') || '');
   const [showNamePrompt, setShowNamePrompt] = useState(false);
   const [tempName, setTempName] = useState('');
-  
+
   const [isTeacherAuthenticated, setIsTeacherAuthenticated] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
   const [showTeacherAuthModal, setShowTeacherAuthModal] = useState(false);
@@ -372,14 +434,14 @@ const App: React.FC = () => {
 
   // 교사 라운지 학생 명단 상태
   const [students, setStudents] = useState<Student[]>(() => {
-    const saved = localStorage.getItem('dream_students');
+    const saved = localStorage.getItem('church_students');
     const parsed: Student[] = saved ? JSON.parse(saved) : [];
     return parsed.map(s => ({ ...s, classId: s.classId ?? null }));
   });
   const [selectedClassFilter, setSelectedClassFilter] = useState<string>('');
   const [loggedInStudents, setLoggedInStudents] = useState<LoggedInStudent[]>([]);
   const [classes, setClasses] = useState<Class[]>(() => {
-    const saved = localStorage.getItem('dream_classes');
+    const saved = localStorage.getItem('church_classes');
     return saved ? JSON.parse(saved) : [];
   });
   const [quizRewardTalents, setQuizRewardTalents] = useState(1);
@@ -396,31 +458,31 @@ const App: React.FC = () => {
   const [editClassName, setEditClassName] = useState('');
 
   const [talents, setTalents] = useState<number>(() => {
-    const saved = localStorage.getItem('dream_talents');
-    return saved ? parseInt(saved) : 100;
+    const saved = localStorage.getItem('church_talents');
+    return saved ? parseInt(saved) : loadChurchConfig().initialCurrency;
   });
   const [completedMissions, setCompletedMissions] = useState<string[]>(() => {
-    const saved = localStorage.getItem('dream_missions');
+    const saved = localStorage.getItem('church_missions');
     return saved ? JSON.parse(saved) : [];
   });
   const [ownedStickers, setOwnedStickers] = useState<string[]>(() => {
-    const saved = localStorage.getItem('dream_stickers');
+    const saved = localStorage.getItem('church_stickers');
     return saved ? JSON.parse(saved) : [];
   });
 
   const [shopItems, setShopItems] = useState<ShopItem[]>(() => {
-    const saved = localStorage.getItem('dream_shop_items');
+    const saved = localStorage.getItem('church_shop_items');
     return saved ? JSON.parse(saved) : STICKERS;
   });
 
   const [materialsList, setMaterialsList] = useState<Record<string, { name: string; file: string }[]>>({});
 
   const [challenges, setChallenges] = useState<Challenge[]>(() => {
-    const saved = localStorage.getItem('dream_challenges');
+    const saved = localStorage.getItem('church_challenges');
     return saved ? JSON.parse(saved) : DEFAULT_CHALLENGES;
   });
   const [completedChallenges, setCompletedChallenges] = useState<string[]>(() => {
-    const saved = localStorage.getItem('dream_completed_challenges');
+    const saved = localStorage.getItem('church_completed_challenges');
     return saved ? JSON.parse(saved) : [];
   });
   const [selectedChallengeRoom, setSelectedChallengeRoom] = useState(false);
@@ -437,12 +499,12 @@ const App: React.FC = () => {
   const [showPreviewViewportDropdown, setShowPreviewViewportDropdown] = useState(false);
 
   const [pendingMissionCompletions, setPendingMissionCompletions] = useState<PendingMissionCompletion[]>(() => {
-    const saved = localStorage.getItem('dream_pending_missions');
+    const saved = localStorage.getItem('church_pending_missions');
     return saved ? JSON.parse(saved) : [];
   });
 
   const [blockedStudentIds, setBlockedStudentIds] = useState<string[]>(() => {
-    const saved = localStorage.getItem('dream_blocked_students');
+    const saved = localStorage.getItem('church_blocked_students');
     return saved ? JSON.parse(saved) : [];
   });
 
@@ -487,47 +549,47 @@ const App: React.FC = () => {
   const [showClassListView, setShowClassListView] = useState(false);
 
   useEffect(() => {
-    localStorage.setItem('dream_talents', talents.toString());
+    localStorage.setItem('church_talents', talents.toString());
   }, [talents]);
 
   useEffect(() => {
-    localStorage.setItem('dream_missions', JSON.stringify(completedMissions));
+    localStorage.setItem('church_missions', JSON.stringify(completedMissions));
   }, [completedMissions]);
 
   useEffect(() => {
-    localStorage.setItem('dream_stickers', JSON.stringify(ownedStickers));
+    localStorage.setItem('church_stickers', JSON.stringify(ownedStickers));
   }, [ownedStickers]);
 
   useEffect(() => {
-    localStorage.setItem('dream_user_name', userName);
+    localStorage.setItem('church_user_name', userName);
   }, [userName]);
 
   useEffect(() => {
-    localStorage.setItem('dream_students', JSON.stringify(students));
+    localStorage.setItem('church_students', JSON.stringify(students));
   }, [students]);
 
   useEffect(() => {
-    localStorage.setItem('dream_classes', JSON.stringify(classes));
+    localStorage.setItem('church_classes', JSON.stringify(classes));
   }, [classes]);
 
   useEffect(() => {
-    localStorage.setItem('dream_shop_items', JSON.stringify(shopItems));
+    localStorage.setItem('church_shop_items', JSON.stringify(shopItems));
   }, [shopItems]);
 
   useEffect(() => {
-    localStorage.setItem('dream_challenges', JSON.stringify(challenges));
+    localStorage.setItem('church_challenges', JSON.stringify(challenges));
   }, [challenges]);
 
   useEffect(() => {
-    localStorage.setItem('dream_completed_challenges', JSON.stringify(completedChallenges));
+    localStorage.setItem('church_completed_challenges', JSON.stringify(completedChallenges));
   }, [completedChallenges]);
 
   useEffect(() => {
-    localStorage.setItem('dream_pending_missions', JSON.stringify(pendingMissionCompletions));
+    localStorage.setItem('church_pending_missions', JSON.stringify(pendingMissionCompletions));
   }, [pendingMissionCompletions]);
 
   useEffect(() => {
-    localStorage.setItem('dream_blocked_students', JSON.stringify(blockedStudentIds));
+    localStorage.setItem('church_blocked_students', JSON.stringify(blockedStudentIds));
   }, [blockedStudentIds]);
 
   useEffect(() => {
@@ -577,16 +639,16 @@ const App: React.FC = () => {
       }
       setUserName(name);
       setShowNamePrompt(false);
-      if (!localStorage.getItem('dream_first_login_done')) {
-        addTalents(5);
-        localStorage.setItem('dream_first_login_done', '1');
-        setTimeout(() => alert('첫 로그인 선물로 5 달란트가 지급되었어요!'), 100);
+      if (!localStorage.getItem('church_first_login_done')) {
+        addTalents(churchConfig.firstLoginBonus);
+        localStorage.setItem('church_first_login_done', '1');
+        setTimeout(() => alert(`첫 로그인 선물로 ${churchConfig.firstLoginBonus} ${churchConfig.currencyName}가 지급되었어요!`), 100);
       }
       setLoggedInStudents(prev => {
         const existingIdx = prev.findIndex(s => s.name === name);
         const entry: LoggedInStudent = { id: (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : Date.now().toString(), name, loggedInAt: new Date().toISOString() };
         const next = existingIdx >= 0 ? prev.map((s, i) => i === existingIdx ? { ...s, loggedInAt: entry.loggedInAt } : s) : [...prev, entry];
-        localStorage.setItem('dream_logged_in_students', JSON.stringify(next));
+        localStorage.setItem('church_logged_in_students', JSON.stringify(next));
         return next;
       });
     } else {
@@ -598,7 +660,7 @@ const App: React.FC = () => {
     if (confirm("로그아웃 하시겠습니까?")) {
       setUserName('');
       setIsTeacherAuthenticated(false);
-      localStorage.removeItem('dream_user_name');
+      localStorage.removeItem('church_user_name');
     }
   };
 
@@ -637,7 +699,7 @@ const App: React.FC = () => {
   const buySticker = (stickerId: string, price: number) => {
     if (ownedStickers.includes(stickerId)) return;
     if (talents < price) {
-      alert("달란트가 부족해요!");
+      alert(`${churchConfig.currencyName}가 부족해요!`);
       return;
     }
     setTalents(prev => prev - price);
@@ -645,15 +707,15 @@ const App: React.FC = () => {
   };
 
   const resetMyTalents = () => {
-    if (!confirm("내 달란트와 수집한 스티커를 모두 초기화할까요?")) return;
+    if (!confirm(`내 ${churchConfig.currencyName}와 수집한 스티커를 모두 초기화할까요?`)) return;
     setTalents(0);
     setOwnedStickers([]);
-    localStorage.setItem('dream_talents', '0');
-    localStorage.setItem('dream_stickers', '[]');
+    localStorage.setItem('church_talents', '0');
+    localStorage.setItem('church_stickers', '[]');
   };
 
   const resetStudentTalents = (id: string) => {
-    if (!confirm("이 학생의 달란트를 0으로 초기화할까요?")) return;
+    if (!confirm(`이 학생의 ${churchConfig.currencyName}를 0으로 초기화할까요?`)) return;
     setStudents(prev => prev.map(s => s.id === id ? { ...s, talents: 0 } : s));
   };
 
@@ -720,7 +782,7 @@ const App: React.FC = () => {
   };
 
   const verifyTeacherPassword = () => {
-    if (teacherPassword === ADMIN_PW) {
+    if (teacherPassword === churchConfig.adminPassword) {
       setIsTeacherAuthenticated(true);
       setIsAdmin(true);
       setShowTeacherAuthModal(false);
@@ -728,7 +790,7 @@ const App: React.FC = () => {
       setActiveTab('teacher');
       setSelectedTopic(null);
       setTeacherPassword('');
-    } else if (teacherPassword === TEACHER_PW) {
+    } else if (teacherPassword === churchConfig.teacherPassword) {
       setIsTeacherAuthenticated(true);
       setIsAdmin(false);
       setShowTeacherAuthModal(false);
@@ -925,7 +987,7 @@ const App: React.FC = () => {
 
   const giveBulkTalents = () => {
     if (students.length === 0) return;
-    if (confirm("모든 학생에게 1 달란트씩 선물할까요?")) {
+    if (confirm(`모든 학생에게 1 ${churchConfig.currencyName}씩 선물할까요?`)) {
       setStudents(prev => prev.map(s => ({ ...s, talents: s.talents + 1 })));
     }
   };
@@ -1050,6 +1112,83 @@ const App: React.FC = () => {
 
   return (
     <div className="min-h-screen pb-20 overflow-x-hidden text-slate-800 bg-sky-50/50 border-l-0 outline-none [outline:0]">
+      {/* Setup Wizard */}
+      {showSetupWizard && (
+        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-gradient-to-br from-sky-400 to-sky-600 p-6">
+          <div className="bg-white p-8 rounded-[40px] shadow-2xl w-full max-w-md space-y-6 animate-in zoom-in-95 duration-300">
+            {setupStep === 0 && (
+              <div className="space-y-6 text-center">
+                <div className="w-20 h-20 bg-sky-100 rounded-3xl flex items-center justify-center mx-auto text-sky-500"><Sparkles className="w-10 h-10" /></div>
+                <h3 className="text-2xl font-black text-sky-900">환영합니다!</h3>
+                <p className="text-slate-500 font-bold">우리 교회에 맞게 앱을 설정해 볼까요?<br/>나중에 관리자 설정에서 변경할 수 있어요.</p>
+                <div className="flex gap-3">
+                  <button onClick={() => { saveChurchConfig(DEFAULT_CHURCH_CONFIG); setShowSetupWizard(false); }} className="flex-1 py-4 bg-slate-100 text-slate-500 rounded-[24px] font-bold">건너뛰기</button>
+                  <button onClick={() => setSetupStep(1)} className="flex-2 py-4 bg-sky-500 text-white rounded-[24px] font-black shadow-lg shadow-sky-100">설정 시작</button>
+                </div>
+              </div>
+            )}
+            {setupStep === 1 && (
+              <div className="space-y-6">
+                <div className="text-center space-y-2">
+                  <h3 className="text-xl font-black text-sky-900">1단계: 교회 정보</h3>
+                  <p className="text-slate-500 font-bold text-sm">교회 이름과 부서 이름을 입력하세요</p>
+                </div>
+                <div className="space-y-3">
+                  <input type="text" value={setupConfig.churchName} onChange={(e) => setSetupConfig(c => ({ ...c, churchName: e.target.value }))} placeholder="교회 이름 (예: 새빛교회)" className="w-full px-5 py-3.5 bg-slate-50 border-2 border-slate-100 rounded-2xl font-bold focus:border-sky-400 focus:outline-none" />
+                  <input type="text" value={setupConfig.departmentName} onChange={(e) => setSetupConfig(c => ({ ...c, departmentName: e.target.value }))} placeholder="부서 이름 (예: 드림아동부)" className="w-full px-5 py-3.5 bg-slate-50 border-2 border-slate-100 rounded-2xl font-bold focus:border-sky-400 focus:outline-none" />
+                  <input type="text" value={setupConfig.eventName} onChange={(e) => setSetupConfig(c => ({ ...c, eventName: e.target.value }))} placeholder="행사 이름 (예: 2026 여름성경학교)" className="w-full px-5 py-3.5 bg-slate-50 border-2 border-slate-100 rounded-2xl font-bold focus:border-sky-400 focus:outline-none" />
+                </div>
+                <div className="flex gap-3">
+                  <button onClick={() => setSetupStep(0)} className="flex-1 py-3.5 bg-slate-100 text-slate-500 rounded-2xl font-bold">이전</button>
+                  <button onClick={() => setSetupStep(2)} className="flex-2 py-3.5 bg-sky-500 text-white rounded-2xl font-black shadow-lg shadow-sky-100">다음</button>
+                </div>
+              </div>
+            )}
+            {setupStep === 2 && (
+              <div className="space-y-6">
+                <div className="text-center space-y-2">
+                  <h3 className="text-xl font-black text-sky-900">2단계: 비밀번호</h3>
+                  <p className="text-slate-500 font-bold text-sm">교사와 관리자 비밀번호를 설정하세요</p>
+                </div>
+                <div className="space-y-3">
+                  <div>
+                    <label className="text-sm font-bold text-slate-500 mb-1 block">교사 비밀번호</label>
+                    <input type="text" value={setupConfig.teacherPassword} onChange={(e) => setSetupConfig(c => ({ ...c, teacherPassword: e.target.value }))} className="w-full px-5 py-3.5 bg-slate-50 border-2 border-slate-100 rounded-2xl font-bold focus:border-sky-400 focus:outline-none" />
+                  </div>
+                  <div>
+                    <label className="text-sm font-bold text-slate-500 mb-1 block">관리자 비밀번호</label>
+                    <input type="text" value={setupConfig.adminPassword} onChange={(e) => setSetupConfig(c => ({ ...c, adminPassword: e.target.value }))} className="w-full px-5 py-3.5 bg-slate-50 border-2 border-slate-100 rounded-2xl font-bold focus:border-sky-400 focus:outline-none" />
+                  </div>
+                </div>
+                <div className="flex gap-3">
+                  <button onClick={() => setSetupStep(1)} className="flex-1 py-3.5 bg-slate-100 text-slate-500 rounded-2xl font-bold">이전</button>
+                  <button onClick={() => setSetupStep(3)} className="flex-2 py-3.5 bg-sky-500 text-white rounded-2xl font-black shadow-lg shadow-sky-100">다음</button>
+                </div>
+              </div>
+            )}
+            {setupStep === 3 && (
+              <div className="space-y-6">
+                <div className="text-center space-y-2">
+                  <h3 className="text-xl font-black text-sky-900">설정 완료!</h3>
+                  <p className="text-slate-500 font-bold text-sm">아래 내용으로 설정할게요</p>
+                </div>
+                <div className="bg-sky-50 rounded-2xl p-5 space-y-2 text-sm">
+                  {setupConfig.churchName && <p><span className="font-black text-slate-600">교회:</span> <span className="font-bold text-sky-700">{setupConfig.churchName}</span></p>}
+                  {setupConfig.departmentName && <p><span className="font-black text-slate-600">부서:</span> <span className="font-bold text-sky-700">{setupConfig.departmentName}</span></p>}
+                  {setupConfig.eventName && <p><span className="font-black text-slate-600">행사:</span> <span className="font-bold text-sky-700">{setupConfig.eventName}</span></p>}
+                  <p><span className="font-black text-slate-600">교사 비밀번호:</span> <span className="font-bold text-sky-700">{setupConfig.teacherPassword}</span></p>
+                  <p><span className="font-black text-slate-600">관리자 비밀번호:</span> <span className="font-bold text-sky-700">{setupConfig.adminPassword}</span></p>
+                </div>
+                <div className="flex gap-3">
+                  <button onClick={() => setSetupStep(2)} className="flex-1 py-3.5 bg-slate-100 text-slate-500 rounded-2xl font-bold">이전</button>
+                  <button onClick={() => { updateChurchConfig(setupConfig); setShowSetupWizard(false); }} className="flex-2 py-3.5 bg-sky-500 text-white rounded-2xl font-black shadow-lg shadow-sky-100">완료!</button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Name Prompt Modal */}
       {showNamePrompt && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 backdrop-blur-sm p-6">
@@ -1125,7 +1264,7 @@ const App: React.FC = () => {
         <div className="flex items-center gap-3 cursor-pointer" onClick={resetView}>
           <div className="p-2 text-white bg-sky-400 rounded-xl shadow-sky-200 shadow-lg"><Sparkles className="w-6 h-6" /></div>
           <div className="hidden sm:block">
-            <h1 className="text-xl font-black leading-none text-sky-900">2026 Dream Bible</h1>
+            <h1 className="text-xl font-black leading-none text-sky-900">{churchConfig.departmentName || churchConfig.eventName || 'Bible Education'}</h1>
             <div className="flex items-center gap-1">
               <Trophy className="w-3 h-3 text-amber-500" />
               <p className="text-[10px] font-black text-sky-600 uppercase tracking-wider">교리 퀴즈 대정복</p>
@@ -1149,7 +1288,7 @@ const App: React.FC = () => {
                 <span className="hidden sm:inline">반별 친구들</span>
               </button>
             )}
-            <button onClick={() => { resetView(); setActiveTab('shop'); }} title="달란트상점" className={`flex items-center gap-2 px-3 py-2 rounded-xl transition-colors border ${activeTab === 'shop' ? 'bg-sky-500 text-white border-sky-500' : 'bg-sky-50 text-sky-700 hover:bg-sky-100 border-sky-100'}`}><ShoppingBag className="w-5 h-5 sm:w-6 sm:h-6 shrink-0" /><span className="hidden sm:inline font-bold">달란트상점</span></button>
+            <button onClick={() => { resetView(); setActiveTab('shop'); }} title={`${churchConfig.currencyName}상점`} className={`flex items-center gap-2 px-3 py-2 rounded-xl transition-colors border ${activeTab === 'shop' ? 'bg-sky-500 text-white border-sky-500' : 'bg-sky-50 text-sky-700 hover:bg-sky-100 border-sky-100'}`}><ShoppingBag className="w-5 h-5 sm:w-6 sm:h-6 shrink-0" /><span className="hidden sm:inline font-bold">{churchConfig.currencyName}상점</span></button>
             {import.meta.env.DEV && (
               <div className="hidden sm:block relative border-l border-sky-100 pl-2">
                 <button type="button" onClick={() => setShowPreviewViewportDropdown(v => !v)} className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-bold ${previewViewport ? 'bg-slate-700 text-white' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`} title="미리보기">
@@ -1345,8 +1484,8 @@ const App: React.FC = () => {
           activeTab === 'shop' ? (
             <div className="space-y-8 animate-in fade-in duration-500">
               <div className="flex flex-wrap items-center justify-between gap-4">
-                <div className="flex items-center gap-4"><button onClick={resetView} className="p-3 bg-white rounded-2xl shadow-sm hover:bg-slate-50 transition-colors"><ChevronLeft className="w-6 h-6" /></button><h2 className="text-3xl font-black text-slate-800">달란트 상점</h2></div>
-                <button onClick={resetMyTalents} className="px-4 py-2.5 bg-slate-100 text-slate-600 rounded-2xl font-bold hover:bg-slate-200 transition-colors flex items-center gap-2 text-sm"><RefreshCw className="w-4 h-4" /> 내 달란트 초기화</button>
+                <div className="flex items-center gap-4"><button onClick={resetView} className="p-3 bg-white rounded-2xl shadow-sm hover:bg-slate-50 transition-colors"><ChevronLeft className="w-6 h-6" /></button><h2 className="text-3xl font-black text-slate-800">{churchConfig.currencyName} 상점</h2></div>
+                <button onClick={resetMyTalents} className="px-4 py-2.5 bg-slate-100 text-slate-600 rounded-2xl font-bold hover:bg-slate-200 transition-colors flex items-center gap-2 text-sm"><RefreshCw className="w-4 h-4" /> 내 {churchConfig.currencyName} 초기화</button>
               </div>
               <div className={`grid gap-6 ${previewGridCols ?? 'grid-cols-1 sm:grid-cols-2 lg:grid-cols-3'}`}>
                 {(shopItems.length ? shopItems : STICKERS).map(sticker => {
@@ -1375,7 +1514,7 @@ const App: React.FC = () => {
                   </div>
                   <div>
                     <h2 className="text-2xl font-black text-slate-800">챌린지 방</h2>
-                    <p className="text-slate-400 font-bold text-sm">달란트를 모아 보세요!</p>
+                    <p className="text-slate-400 font-bold text-sm">{churchConfig.currencyName}를 모아 보세요!</p>
                   </div>
                 </div>
               </div>
@@ -1391,9 +1530,9 @@ const App: React.FC = () => {
                           <h3 className="text-xl font-black text-slate-800">{ch.title}</h3>
                           <p className="text-slate-600 font-medium mt-1">{ch.description}</p>
                           {ch.type === 'normal' ? (
-                            <p className="mt-2 font-black text-amber-600">완료 시 {ch.talents} 달란트</p>
+                            <p className="mt-2 font-black text-amber-600">완료 시 {ch.talents} {churchConfig.currencyName}</p>
                           ) : (
-                            <p className="mt-2 font-black text-amber-600">달란트 걸기 (완료 시 2배, 최대 {ch.talents} 달란트)</p>
+                            <p className="mt-2 font-black text-amber-600">{churchConfig.currencyName} 걸기 (완료 시 2배, 최대 {ch.talents} {churchConfig.currencyName})</p>
                           )}
                         </div>
                         {isAdmin && (
@@ -1404,7 +1543,7 @@ const App: React.FC = () => {
                               <button onClick={() => setEditingChallengeId(null)} className="px-3 py-1 bg-slate-200 rounded-lg font-bold text-sm">취소</button>
                             </div>
                           ) : (
-                            <button onClick={() => { setEditingChallengeId(ch.id); setEditChallengeTalents(ch.talents); }} className="p-2 bg-slate-100 rounded-xl font-bold text-sm">달란트 수정</button>
+                            <button onClick={() => { setEditingChallengeId(ch.id); setEditChallengeTalents(ch.talents); }} className="p-2 bg-slate-100 rounded-xl font-bold text-sm">{churchConfig.currencyName} 수정</button>
                           )
                         )}
                       </div>
@@ -1425,7 +1564,7 @@ const App: React.FC = () => {
                               );
                             }
                             if (tetrisGameOver && (tetrisLinesCleared >= TARGET_LINES || tetrisScore >= TARGET_SCORE)) {
-                              return <p className="font-bold text-green-600">챌린지 완료! {ch.talents} 달란트를 받았어요!</p>;
+                              return <p className="font-bold text-green-600">챌린지 완료! {ch.talents} {churchConfig.currencyName}를 받았어요!</p>;
                             }
                             if (tetrisGameOver) {
                               return (
@@ -1488,7 +1627,10 @@ const App: React.FC = () => {
                         ) : ch.id === 'ch-kakao' ? (
                           <div className="space-y-4">
                             <div className="flex flex-wrap gap-2">
-                              {TEACHERS.map(t => (
+                              {teachers.length === 0 ? (
+                                <p className="text-slate-400 font-bold text-sm">관리자 설정에서 선생님을 추가해 주세요.</p>
+                              ) : null}
+                              {teachers.map(t => (
                                 <a key={t.id} href={t.kakaoLink} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-2 px-4 py-2 bg-yellow-100 text-yellow-800 rounded-xl font-bold hover:bg-yellow-200 border border-yellow-300">
                                   <MessageCircle className="w-5 h-5" /> {t.name} 카톡으로 인사하기
                                 </a>
@@ -1502,13 +1644,13 @@ const App: React.FC = () => {
                       ) : (
                         <div className="space-y-2">
                           {ch.id === 'ch-bet' && (
-                            <p className="text-slate-600 font-medium text-sm bg-amber-50 p-3 rounded-xl border border-amber-100">오늘 미션: 가족에게 배운 말씀 한 줄 전하기. 완료하면 걸었던 달란트 2배!</p>
+                            <p className="text-slate-600 font-medium text-sm bg-amber-50 p-3 rounded-xl border border-amber-100">오늘 미션: 가족에게 배운 말씀 한 줄 전하기. 완료하면 걸었던 {churchConfig.currencyName} 2배!</p>
                           )}
                           {isCompleted ? (
                             <p className="font-bold text-slate-400">완료했어요!</p>
                           ) : isBetPending ? (
                             <>
-                              <p className="font-bold text-slate-600">{pendingBetAmount} 달란트 걸었어요. 완료하면 2배로 받아요!</p>
+                              <p className="font-bold text-slate-600">{pendingBetAmount} {churchConfig.currencyName} 걸었어요. 완료하면 2배로 받아요!</p>
                               <button onClick={() => { addTalents(pendingBetAmount * 2); setCompletedChallenges(prev => [...prev, ch.id]); setPendingBetChallengeId(null); setPendingBetAmount(0); }} className="px-6 py-3 bg-amber-500 text-white rounded-2xl font-black hover:bg-amber-600">완료했어요 (2배 받기)</button>
                             </>
                           ) : (
@@ -1528,7 +1670,7 @@ const App: React.FC = () => {
             <div className="space-y-12 animate-in fade-in duration-700">
               <div className="space-y-4 text-center pt-8">
                 <div className="inline-block px-6 py-2 bg-amber-100 text-amber-600 rounded-full font-black text-sm mb-2 shadow-sm border border-amber-200">🏆 성경 퀴즈대회 완벽 대비!</div>
-                <h2 className="text-4xl md:text-5xl font-black tracking-tight text-sky-900 leading-tight">2026 드림아동부<br/><span className="text-sky-500 relative inline-block">교리성경공부<span className="absolute bottom-0 left-0 w-full h-3 bg-sky-200/50 -z-10 rounded-full"></span></span></h2>
+                <h2 className="text-4xl md:text-5xl font-black tracking-tight text-sky-900 leading-tight">{getDisplayTitle().line1}<br/><span className="text-sky-500 relative inline-block">{getDisplayTitle().line2}<span className="absolute bottom-0 left-0 w-full h-3 bg-sky-200/50 -z-10 rounded-full"></span></span></h2>
                 <p className="text-slate-500 font-bold text-xl md:text-2xl">(초등부 어린이 조직신학)</p>
               </div>
               
@@ -1544,7 +1686,7 @@ const App: React.FC = () => {
                   <div className="text-left">
                     <h3 className="text-3xl font-black mb-2 tracking-tight">교리퀴즈 전체 도전</h3>
                     <p className="font-bold opacity-90 text-amber-50 text-lg">모든 주제의 문제를 랜덤하게 풀어보세요!</p>
-                    <p className="mt-1 font-black text-amber-100 text-sm">완료 시 5 달란트</p>
+                    <p className="mt-1 font-black text-amber-100 text-sm">완료 시 5 {churchConfig.currencyName}</p>
                   </div>
                 </div>
                 <div className="flex items-center gap-3 bg-white/20 px-8 py-4 rounded-[28px] font-black text-xl backdrop-blur-md border border-white/30 relative z-10 group-hover:bg-white group-hover:text-amber-600 transition-all shadow-lg">
@@ -1562,7 +1704,7 @@ const App: React.FC = () => {
                 ))}
                 <button onClick={() => { setSelectedChallengeRoom(true); setSelectedTopic(null); }} className="relative flex flex-col items-center gap-4 p-8 transition-all duration-300 bg-amber-500 border-2 border-transparent group rounded-[40px] shadow-lg hover:shadow-2xl hover:bg-amber-600 overflow-hidden text-center">
                   <div className="p-6 rounded-3xl bg-amber-400 text-white group-hover:scale-110 transition-transform shadow-lg"><Trophy className="w-10 h-10" /></div>
-                  <div><h3 className="text-xl font-black text-white">챌린지 방</h3><p className="text-xs font-bold text-amber-100 tracking-widest uppercase mt-1">게임·성경·카톡으로 달란트 모으기</p></div>
+                  <div><h3 className="text-xl font-black text-white">챌린지 방</h3><p className="text-xs font-bold text-amber-100 tracking-widest uppercase mt-1">게임·성경·카톡으로 {churchConfig.currencyName} 모으기</p></div>
                 </button>
                 <button onClick={handleTeacherLoungeClick} className="relative flex flex-col items-center gap-4 p-8 transition-all duration-300 bg-slate-800 border-2 border-transparent group rounded-[40px] shadow-lg hover:shadow-2xl hover:bg-slate-900 overflow-hidden text-center">
                   <div className="p-6 rounded-3xl bg-slate-600 text-white group-hover:scale-110 transition-transform shadow-lg">{isTeacherAuthenticated ? <Library className="w-10 h-10" /> : <Lock className="w-10 h-10" />}</div>
@@ -1580,7 +1722,7 @@ const App: React.FC = () => {
                 <button onClick={() => { setIsTeacherAuthenticated(false); setIsAdmin(false); resetView(); }} className="p-3 bg-slate-800 text-white rounded-2xl shadow-sm hover:bg-slate-900 transition-all flex items-center gap-2 font-bold text-sm"><Lock className="w-4 h-4" /> 잠금</button>
               </div>
               <div className="mb-2">
-                <h2 className="text-xl font-black text-slate-800">드림 교사 라운지</h2>
+                <h2 className="text-xl font-black text-slate-800">교사 라운지</h2>
                 <p className="text-slate-400 font-bold text-xs mt-0.5">메뉴를 선택하세요</p>
               </div>
               <nav className="flex md:flex-col gap-2 overflow-x-auto md:overflow-visible pb-2 md:pb-0 scrollbar-hide">
@@ -1612,8 +1754,8 @@ const App: React.FC = () => {
 
                 {selectedTeacherCategory.id === 'mission-confirm' ? (
                   <div className="bg-white p-6 sm:p-10 rounded-[40px] shadow-2xl border-4 border-teal-100 space-y-8">
-                    <h4 className="text-xl font-black text-slate-800">오늘의 드림 미션 확인</h4>
-                    <p className="text-slate-600 font-medium text-sm">학생이 완료한 미션을 확인하고 확인 버튼을 누르면 해당 학생에게 3 달란트가 부여됩니다.</p>
+                    <h4 className="text-xl font-black text-slate-800">오늘의 미션 확인</h4>
+                    <p className="text-slate-600 font-medium text-sm">학생이 완료한 미션을 확인하고 확인 버튼을 누르면 해당 학생에게 3 {churchConfig.currencyName}가 부여됩니다.</p>
                     {pendingMissionCompletions.length === 0 ? (
                       <div className="text-center py-16 bg-slate-50/50 rounded-3xl border-2 border-dashed border-slate-100">
                         <CheckCircle2 className="w-16 h-16 mx-auto text-slate-200 mb-4" />
@@ -1677,7 +1819,7 @@ const App: React.FC = () => {
                         </button>
                       </div>
                       <button onClick={giveBulkTalents} className="px-6 py-4 bg-sky-500 text-white rounded-2xl font-black hover:bg-sky-600 transition-all flex items-center justify-center gap-2 shadow-lg shadow-sky-100">
-                        <Star className="w-6 h-6" /> 전체 +1 달란트
+                        <Star className="w-6 h-6" /> 전체 +1 {churchConfig.currencyName}
                       </button>
                     </div>
 
@@ -1695,7 +1837,7 @@ const App: React.FC = () => {
                       <div className="flex items-center justify-between px-4 sm:px-6 py-2 bg-slate-50 rounded-xl text-slate-400 font-black text-sm uppercase tracking-widest gap-2">
                         <span>학생 이름</span>
                         <span className="shrink-0">반</span>
-                        <span className="shrink-0">달란트 현황</span>
+                        <span className="shrink-0">{churchConfig.currencyName} 현황</span>
                       </div>
                       <div className="grid gap-3 max-h-[400px] overflow-y-auto pr-2 scrollbar-hide">
                         {(talentGiftListMode === 'loggedIn'
@@ -1741,9 +1883,9 @@ const App: React.FC = () => {
                                     <span className="font-black text-amber-700 tabular-nums">{student.talents}</span>
                                   </div>
                                   <div className="flex items-center gap-2 flex-wrap">
-                                    <input type="number" min={1} value={giftAmountByStudent[student.id] ?? 1} onChange={(e) => setGiftAmountByStudent(prev => ({ ...prev, [student.id]: Math.max(1, Number(e.target.value) || 1) }))} placeholder="달란트" className="w-14 sm:w-16 px-2 py-2 bg-slate-50 border-2 border-slate-100 rounded-xl font-bold text-slate-700 text-sm focus:border-amber-400 focus:outline-none" />
+                                    <input type="number" min={1} value={giftAmountByStudent[student.id] ?? 1} onChange={(e) => setGiftAmountByStudent(prev => ({ ...prev, [student.id]: Math.max(1, Number(e.target.value) || 1) }))} placeholder={churchConfig.currencyName} className="w-14 sm:w-16 px-2 py-2 bg-slate-50 border-2 border-slate-100 rounded-xl font-bold text-slate-700 text-sm focus:border-amber-400 focus:outline-none" />
                                     <button onClick={() => { const amt = Math.max(1, giftAmountByStudent[student.id] ?? 1); giveTalentToStudent(student.id, amt); }} className="min-w-[3.5rem] px-4 py-2 bg-amber-500 text-white rounded-xl font-bold text-base hover:bg-amber-600">부여</button>
-                                    <button onClick={() => giveTalentToStudent(student.id, 1)} className="p-2 bg-sky-100 text-sky-600 rounded-xl hover:bg-sky-500 hover:text-white transition-all" title="+1 달란트">
+                                    <button onClick={() => giveTalentToStudent(student.id, 1)} className="p-2 bg-sky-100 text-sky-600 rounded-xl hover:bg-sky-500 hover:text-white transition-all" title={`+1 ${churchConfig.currencyName}`}>
                                       <PlusCircle className="w-6 h-6" />
                                     </button>
                                     <button onClick={() => resetStudentTalents(student.id)} className="p-2 bg-slate-100 text-slate-500 rounded-xl hover:bg-slate-300 transition-all font-bold text-xs" title="0으로 초기화">0</button>
@@ -1787,7 +1929,7 @@ const App: React.FC = () => {
                               <>
                                 <span className="text-2xl">{item.icon}</span>
                                 <span className="flex-1 font-black text-slate-700">{item.name}</span>
-                                <span className="font-black text-amber-600">{item.price} 달란트</span>
+                                <span className="font-black text-amber-600">{item.price} {churchConfig.currencyName}</span>
                                 {isAdmin && (
                                   <>
                                     <button onClick={() => startEditShopItem(item)} className="p-2 bg-slate-100 text-slate-600 rounded-xl hover:bg-slate-200 text-sm font-bold">수정</button>
@@ -1817,7 +1959,7 @@ const App: React.FC = () => {
                               <th className="py-3 px-4 font-black text-slate-600">이름</th>
                               <th className="py-3 px-4 font-black text-slate-600">로그인 시각</th>
                               <th className="py-3 px-4 font-black text-slate-600">반</th>
-                              <th className="py-3 px-4 font-black text-slate-600">달란트</th>
+                              <th className="py-3 px-4 font-black text-slate-600">{churchConfig.currencyName}</th>
                               {isAdmin && <th className="py-3 px-4 font-black text-slate-600">차단</th>}
                             </tr>
                           </thead>
@@ -1948,6 +2090,107 @@ const App: React.FC = () => {
                       </div>
                     )}
                   </div>
+                ) : selectedTeacherCategory.id === 'church-settings' ? (
+                  <div className="bg-white p-6 sm:p-10 rounded-[40px] shadow-2xl border-4 border-gray-100 space-y-8">
+                    <h4 className="text-xl font-black text-slate-800 flex items-center gap-2"><Settings className="w-6 h-6 text-gray-500" /> 교회 설정</h4>
+
+                    <div className="space-y-4">
+                      <h5 className="font-black text-slate-700">기본 정보</h5>
+                      <div className="grid gap-3">
+                        <div>
+                          <label className="text-sm font-bold text-slate-500 mb-1 block">교회 이름</label>
+                          <input type="text" value={churchConfig.churchName} onChange={(e) => updateChurchConfig({ ...churchConfig, churchName: e.target.value })} placeholder="예: 새빛교회" className="w-full px-4 py-3 bg-slate-50 border-2 border-slate-100 rounded-2xl font-bold focus:border-sky-400 focus:outline-none" />
+                        </div>
+                        <div>
+                          <label className="text-sm font-bold text-slate-500 mb-1 block">부서 이름</label>
+                          <input type="text" value={churchConfig.departmentName} onChange={(e) => updateChurchConfig({ ...churchConfig, departmentName: e.target.value })} placeholder="예: 드림아동부" className="w-full px-4 py-3 bg-slate-50 border-2 border-slate-100 rounded-2xl font-bold focus:border-sky-400 focus:outline-none" />
+                        </div>
+                        <div>
+                          <label className="text-sm font-bold text-slate-500 mb-1 block">행사 이름</label>
+                          <input type="text" value={churchConfig.eventName} onChange={(e) => updateChurchConfig({ ...churchConfig, eventName: e.target.value })} placeholder="예: 2026 여름성경학교" className="w-full px-4 py-3 bg-slate-50 border-2 border-slate-100 rounded-2xl font-bold focus:border-sky-400 focus:outline-none" />
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="space-y-4 pt-4 border-t border-slate-100">
+                      <h5 className="font-black text-slate-700">비밀번호 설정</h5>
+                      <div className="grid gap-3 sm:grid-cols-2">
+                        <div>
+                          <label className="text-sm font-bold text-slate-500 mb-1 block">교사 비밀번호</label>
+                          <input type="text" value={churchConfig.teacherPassword} onChange={(e) => updateChurchConfig({ ...churchConfig, teacherPassword: e.target.value })} className="w-full px-4 py-3 bg-slate-50 border-2 border-slate-100 rounded-2xl font-bold focus:border-sky-400 focus:outline-none" />
+                        </div>
+                        <div>
+                          <label className="text-sm font-bold text-slate-500 mb-1 block">관리자 비밀번호</label>
+                          <input type="text" value={churchConfig.adminPassword} onChange={(e) => updateChurchConfig({ ...churchConfig, adminPassword: e.target.value })} className="w-full px-4 py-3 bg-slate-50 border-2 border-slate-100 rounded-2xl font-bold focus:border-sky-400 focus:outline-none" />
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="space-y-4 pt-4 border-t border-slate-100">
+                      <h5 className="font-black text-slate-700">보상 시스템</h5>
+                      <div className="grid gap-3 sm:grid-cols-3">
+                        <div>
+                          <label className="text-sm font-bold text-slate-500 mb-1 block">보상 명칭</label>
+                          <input type="text" value={churchConfig.currencyName} onChange={(e) => updateChurchConfig({ ...churchConfig, currencyName: e.target.value })} placeholder="예: 달란트" className="w-full px-4 py-3 bg-slate-50 border-2 border-slate-100 rounded-2xl font-bold focus:border-sky-400 focus:outline-none" />
+                        </div>
+                        <div>
+                          <label className="text-sm font-bold text-slate-500 mb-1 block">초기 지급량</label>
+                          <input type="number" value={churchConfig.initialCurrency} onChange={(e) => updateChurchConfig({ ...churchConfig, initialCurrency: Math.max(0, Number(e.target.value) || 0) })} className="w-full px-4 py-3 bg-slate-50 border-2 border-slate-100 rounded-2xl font-bold focus:border-sky-400 focus:outline-none" />
+                        </div>
+                        <div>
+                          <label className="text-sm font-bold text-slate-500 mb-1 block">첫 로그인 보너스</label>
+                          <input type="number" value={churchConfig.firstLoginBonus} onChange={(e) => updateChurchConfig({ ...churchConfig, firstLoginBonus: Math.max(0, Number(e.target.value) || 0) })} className="w-full px-4 py-3 bg-slate-50 border-2 border-slate-100 rounded-2xl font-bold focus:border-sky-400 focus:outline-none" />
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="space-y-4 pt-4 border-t border-slate-100">
+                      <div className="flex items-center justify-between">
+                        <h5 className="font-black text-slate-700">선생님 목록</h5>
+                        <button onClick={() => {
+                          const name = prompt('선생님 이름을 입력하세요:');
+                          if (!name?.trim()) return;
+                          const kakaoLink = prompt('카카오톡 오픈채팅 링크를 입력하세요 (선택):') || '';
+                          const newTeacher: Teacher = { id: Date.now().toString(), name: name.trim(), kakaoLink };
+                          updateTeachers([...teachers, newTeacher]);
+                        }} className="px-4 py-2 bg-sky-500 text-white rounded-2xl font-bold text-sm hover:bg-sky-600 flex items-center gap-2"><UserPlus className="w-4 h-4" /> 추가</button>
+                      </div>
+                      {teachers.length === 0 ? (
+                        <div className="text-center py-8 bg-slate-50/50 rounded-3xl border-2 border-dashed border-slate-100 text-slate-400 font-bold">등록된 선생님이 없어요. 추가 버튼을 눌러 선생님을 등록하세요.</div>
+                      ) : (
+                        <div className="grid gap-3">
+                          {teachers.map(t => (
+                            <div key={t.id} className="flex items-center justify-between p-4 bg-slate-50 rounded-2xl gap-4">
+                              <div className="min-w-0">
+                                <p className="font-black text-slate-700">{t.name}</p>
+                                {t.kakaoLink && <p className="text-sm text-sky-500 font-medium truncate">{t.kakaoLink}</p>}
+                              </div>
+                              <div className="flex items-center gap-2 shrink-0">
+                                <button onClick={() => {
+                                  const name = prompt('이름 수정:', t.name);
+                                  if (!name?.trim()) return;
+                                  const kakaoLink = prompt('카카오톡 링크 수정:', t.kakaoLink) ?? t.kakaoLink;
+                                  updateTeachers(teachers.map(x => x.id === t.id ? { ...x, name: name.trim(), kakaoLink } : x));
+                                }} className="p-2 bg-white text-slate-600 rounded-xl hover:bg-sky-100 border border-slate-200"><Pencil className="w-4 h-4" /></button>
+                                <button onClick={() => {
+                                  if (!confirm(`${t.name} 선생님을 삭제할까요?`)) return;
+                                  updateTeachers(teachers.filter(x => x.id !== t.id));
+                                }} className="p-2 bg-red-50 text-red-400 rounded-xl hover:bg-red-500 hover:text-white transition-all"><Trash2 className="w-4 h-4" /></button>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="pt-4 border-t border-slate-100">
+                      <button onClick={() => {
+                        if (!confirm('모든 데이터(학생, 반, 보상, 미션 등)를 초기화할까요? 교회 설정은 유지됩니다.')) return;
+                        ['church_students','church_classes','church_talents','church_missions','church_stickers','church_shop_items','church_challenges','church_completed_challenges','church_pending_missions','church_blocked_students','church_logged_in_students','church_user_name','church_first_login_done'].forEach(k => localStorage.removeItem(k));
+                        window.location.reload();
+                      }} className="px-6 py-3 bg-red-500 text-white rounded-2xl font-black hover:bg-red-600 flex items-center gap-2"><RefreshCw className="w-5 h-5" /> 데이터 초기화</button>
+                    </div>
+                  </div>
                 ) : MATERIAL_CATEGORY_IDS.includes(selectedTeacherCategory.id) ? (
                   <div className="bg-white p-6 sm:p-10 rounded-[40px] shadow-2xl border-4 border-slate-100 space-y-6">
                     <input ref={materialFileInputRef} type="file" accept=".pdf,.ppt,.pptx,.doc,.docx,.hwp,image/*" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) uploadMaterial(selectedTeacherCategory.id, f); e.target.value = ''; }} />
@@ -2021,7 +2264,7 @@ const App: React.FC = () => {
                   <div className="p-8 space-y-8 bg-white border shadow-2xl rounded-[40px] border-sky-50">
                     <div className="p-8 border-l-8 bg-amber-50 rounded-3xl border-amber-400 relative overflow-hidden"><Star className="absolute -top-4 -right-4 w-16 h-16 text-amber-200 fill-amber-100 opacity-50" /><h4 className="flex items-center gap-2 mb-3 font-black text-amber-800 text-lg uppercase tracking-wider"><Award className="w-6 h-6" /> 오늘의 보석 말씀</h4><p className="text-2xl font-bold italic leading-relaxed text-amber-900">"{selectedTopic?.verse}"</p></div>
                     <div className="space-y-4"><h4 className="text-2xl font-black text-slate-800 flex items-center gap-2"><BookOpen className="w-6 h-6 text-sky-500" /> 어떤 내용인가요?</h4><p className="text-xl leading-relaxed text-slate-600 font-medium whitespace-pre-wrap">{selectedTopic?.coreContent}</p></div>
-                    <button onClick={() => startQuiz(selectedTopic?.id)} className="w-full mt-6 py-6 bg-amber-400 text-white rounded-[32px] font-black text-2xl shadow-lg shadow-amber-100 hover:bg-amber-500 transition-all flex flex-col items-center justify-center gap-1 active:scale-95"><span className="flex items-center gap-3"><Trophy className="w-8 h-8" /> 이 주제 퀴즈 도전하기!</span><span className="text-sm font-bold text-amber-100">완료 시 1 달란트</span></button>
+                    <button onClick={() => startQuiz(selectedTopic?.id)} className="w-full mt-6 py-6 bg-amber-400 text-white rounded-[32px] font-black text-2xl shadow-lg shadow-amber-100 hover:bg-amber-500 transition-all flex flex-col items-center justify-center gap-1 active:scale-95"><span className="flex items-center gap-3"><Trophy className="w-8 h-8" /> 이 주제 퀴즈 도전하기!</span><span className="text-sm font-bold text-amber-100">완료 시 1 {churchConfig.currencyName}</span></button>
                   </div>
                 </div>
               )}
@@ -2035,7 +2278,7 @@ const App: React.FC = () => {
                   <div className="p-8 space-y-8 bg-white border shadow-2xl rounded-[40px] border-sky-50">
                     <div className="space-y-4"><h4 className="text-2xl font-black text-slate-800 flex items-center gap-2"><Heart className="w-6 h-6 text-red-500" /> 나에게 주는 의미</h4><p className="text-xl leading-relaxed text-slate-600 font-medium whitespace-pre-wrap">{selectedTopic?.meaningContent}</p></div>
                     <div className="pt-6 space-y-6 border-t border-slate-100">
-                      <div className="flex items-center justify-between"><h4 className="text-2xl font-black text-slate-800 flex items-center gap-2"><Gamepad2 className="w-6 h-6 text-sky-500" /> 오늘의 드림 미션!</h4><div className="text-sm font-black text-amber-600 bg-amber-100 px-4 py-2 rounded-full border border-amber-200 shadow-sm flex items-center gap-1"><Coins className="w-4 h-4 fill-amber-500 text-amber-500" /> 선생님 확인 후 3 달란트</div></div>
+                      <div className="flex items-center justify-between"><h4 className="text-2xl font-black text-slate-800 flex items-center gap-2"><Gamepad2 className="w-6 h-6 text-sky-500" /> 오늘의 미션!</h4><div className="text-sm font-black text-amber-600 bg-amber-100 px-4 py-2 rounded-full border border-amber-200 shadow-sm flex items-center gap-1"><Coins className="w-4 h-4 fill-amber-500 text-amber-500" /> 선생님 확인 후 3 {churchConfig.currencyName}</div></div>
                       <div className="grid gap-4">
                         {selectedTopic?.missions.map((m, i) => {
                           const missionId = `${selectedTopic?.id}-m-${i}`;
@@ -2060,7 +2303,7 @@ const App: React.FC = () => {
       <footer className="px-6 mt-16 space-y-4 text-center pb-20">
         <div className="flex justify-center gap-8 opacity-20 grayscale"><Sparkles className="w-6 h-6" /><Award className="w-6 h-6" /><Star className="w-6 h-6" /><Gamepad2 className="w-6 h-6" /></div>
         <div>
-          <p className="text-sm font-black text-slate-400 uppercase tracking-widest leading-loose">© 2026 Dream Kids Summer Bible School<br/>대한예수교장로회 총회훈련원 교재 기반</p>
+          <p className="text-sm font-black text-slate-400 uppercase tracking-widest leading-loose">© {new Date().getFullYear()} {churchConfig.churchName || 'Church Education App'}<br/>대한예수교장로회 총회훈련원 교재 기반</p>
           <div className="flex items-center justify-center gap-1 mt-2 text-sky-300 text-xs font-black italic"><Heart className="w-3 h-3 fill-sky-200 text-sky-200" /> 어린이 조직신학 탐험대</div>
         </div>
       </footer>
