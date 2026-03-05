@@ -79,4 +79,26 @@ export type ChurchConfig = {
   currencyName: string;
   initialCurrency: number;
   firstLoginBonus: number;
+  apiUrl?: string;
+  adminEmail?: string;
+  googleDriveAppFolderId?: string;
+  googleDriveCategoryFolderIds?: Record<string, string>;
+};
+
+export type GoogleDriveFile = {
+  id: string;
+  name: string;
+  mimeType: string;
+  webViewLink: string;
+  webContentLink: string;
+  size?: string;
+  createdTime?: string;
+};
+
+export type GoogleDriveState = {
+  isSignedIn: boolean;
+  accessToken: string | null;
+  userEmail: string | null;
+  appFolderId: string | null;
+  categoryFolderIds: Record<string, string>;
 };

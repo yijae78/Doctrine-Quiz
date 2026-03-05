@@ -1,7 +1,7 @@
 /// <reference types="vite/client" />
 import React, { useState, useEffect, useRef } from 'react';
 import { createRoot } from 'react-dom/client';
-import type { Topic, QuizQuestion, TeacherCategory, Class, LoggedInStudent, Student, ShopItem, Challenge, PendingMissionCompletion, Teacher, ChurchConfig } from './types';
+import type { Topic, QuizQuestion, TeacherCategory, Class, LoggedInStudent, Student, ShopItem, Challenge, PendingMissionCompletion, Teacher, ChurchConfig, GoogleDriveFile, GoogleDriveState } from './types';
 import { 
   BookOpen, 
   Sun, 
@@ -53,7 +53,8 @@ import {
   Loader2,
   PlusCircle,
   UserMinus,
-  Settings
+  Settings,
+  Copy
 } from 'lucide-react';
 
 // 성경 본문 데이터셋 (오프라인 환경 및 성능 최적화를 위해 로컬에 포함)
@@ -101,6 +102,11 @@ const BIBLE_DATASET: Record<string, string> = {
   "딛 2:13": "복스러운 소망과 우리의 크신 하나님 구주 예수 그리스도의 영광 나타나심을 기다리게 하셨으니",
   "벧후 3:11": "이 모든 것이 이렇게 풀어지리니 너희가 어떠한 사람이 되어야 마땅하냐 거룩한 행실과 경건함으로"
 };
+
+// ── 템플릿 Google Sheet ID (한 번 만들어서 여기에 넣으면 코드 복붙 불필요) ──
+// 사용법: 1) Google Sheet 만들기 2) 확장프로그램→Apps Script에 코드 붙여넣기 3) 시트 ID를 아래에 입력
+// 시트 URL이 https://docs.google.com/spreadsheets/d/ABC123/edit 이면 ABC123이 ID
+const TEMPLATE_SHEET_ID = ''; // 비어있으면 수동 설정 모드
 
 // ── 교회 설정 (범용) ──
 const DEFAULT_CHURCH_CONFIG: ChurchConfig = {
@@ -153,6 +159,149 @@ async function fetchMaterials(): Promise<Record<string, { name: string; file: st
   if (!res.ok) return {};
   const data = await res.json();
   return data || {};
+}
+
+// ===== Google Drive API 유틸리티 =====
+const DRIVE_API = 'https://www.googleapis.com/drive/v3';
+const UPLOAD_API = 'https://www.googleapis.com/upload/drive/v3';
+
+declare global {
+  interface Window {
+    google?: {
+      accounts: {
+        oauth2: {
+          initTokenClient: (config: any) => any;
+          revoke: (token: string, callback: () => void) => void;
+        };
+      };
+    };
+  }
+}
+
+async function driveApiFetch(endpoint: string, token: string, options?: RequestInit): Promise<any> {
+  const res = await fetch(`${DRIVE_API}${endpoint}`, {
+    ...options,
+    headers: { 'Authorization': `Bearer ${token}`, ...options?.headers },
+  });
+  if (!res.ok) {
+    const err = await res.text().catch(() => '');
+    throw new Error(`Drive API ${res.status}: ${err}`);
+  }
+  return res.json();
+}
+
+async function findOrCreateFolder(token: string, folderName: string, parentId?: string): Promise<string> {
+  let query = `name='${folderName}' and mimeType='application/vnd.google-apps.folder' and trashed=false`;
+  if (parentId) query += ` and '${parentId}' in parents`;
+  const result = await driveApiFetch(`/files?q=${encodeURIComponent(query)}&fields=files(id,name)`, token);
+  if (result.files?.length > 0) return result.files[0].id;
+  const metadata: any = { name: folderName, mimeType: 'application/vnd.google-apps.folder' };
+  if (parentId) metadata.parents = [parentId];
+  const created = await driveApiFetch('/files', token, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(metadata),
+  });
+  return created.id;
+}
+
+const DRIVE_CATEGORY_NAMES: Record<string, string> = {
+  'teacher-manual': '교사용 지도안',
+  'teacher-workbook': '학생용 활동지',
+  'slides': '교육용 PPT',
+  'corner-learning': '코너학습 가이드',
+};
+
+async function initDriveFolders(token: string, appName: string): Promise<{ appFolderId: string; categoryFolderIds: Record<string, string> }> {
+  const appFolderId = await findOrCreateFolder(token, appName || 'Church Education App');
+  // 앱 폴더 공개 설정
+  try {
+    await driveApiFetch(`/files/${appFolderId}/permissions`, token, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ role: 'reader', type: 'anyone' }),
+    });
+  } catch { /* 이미 공개인 경우 무시 */ }
+  const categoryFolderIds: Record<string, string> = {};
+  for (const [catId, catName] of Object.entries(DRIVE_CATEGORY_NAMES)) {
+    categoryFolderIds[catId] = await findOrCreateFolder(token, catName, appFolderId);
+  }
+  return { appFolderId, categoryFolderIds };
+}
+
+async function uploadFileToDrive(token: string, file: File, folderId: string): Promise<GoogleDriveFile> {
+  const metadata = { name: file.name, parents: [folderId] };
+  const form = new FormData();
+  form.append('metadata', new Blob([JSON.stringify(metadata)], { type: 'application/json' }));
+  form.append('file', file);
+  const res = await fetch(`${UPLOAD_API}/files?uploadType=multipart&fields=id,name,mimeType,webViewLink,webContentLink,size,createdTime`, {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${token}` },
+    body: form,
+  });
+  if (!res.ok) throw new Error(`Upload failed: ${res.status}`);
+  const data = await res.json();
+  // 파일 공개 설정
+  await driveApiFetch(`/files/${data.id}/permissions`, token, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ role: 'reader', type: 'anyone' }),
+  });
+  return data;
+}
+
+async function listDriveFiles(token: string, folderId: string): Promise<GoogleDriveFile[]> {
+  const query = `'${folderId}' in parents and trashed=false`;
+  const result = await driveApiFetch(`/files?q=${encodeURIComponent(query)}&fields=files(id,name,mimeType,webViewLink,webContentLink,size,createdTime)&orderBy=createdTime desc`, token);
+  return result.files || [];
+}
+
+async function deleteDriveFile(token: string, fileId: string): Promise<void> {
+  const res = await fetch(`${DRIVE_API}/files/${fileId}`, {
+    method: 'DELETE',
+    headers: { 'Authorization': `Bearer ${token}` },
+  });
+  if (!res.ok) throw new Error(`Delete failed: ${res.status}`);
+}
+
+// ===== Google Apps Script API 서비스 =====
+async function gasGet(apiUrl: string, params: Record<string, string>): Promise<any> {
+  const url = new URL(apiUrl);
+  Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v));
+  const res = await fetch(url.toString(), { redirect: 'follow' });
+  if (!res.ok) throw new Error(`API GET failed: ${res.status}`);
+  return res.json();
+}
+
+async function gasPost(apiUrl: string, body: Record<string, any>): Promise<any> {
+  const res = await fetch(apiUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain' },
+    body: JSON.stringify(body),
+    redirect: 'follow',
+  });
+  if (!res.ok) throw new Error(`API POST failed: ${res.status}`);
+  const data = await res.json();
+  if (data.error) throw new Error(data.error);
+  return data;
+}
+
+async function testApiConnection(url: string): Promise<boolean> {
+  try {
+    const result = await gasGet(url, { action: 'ping' });
+    return result?.ok === true;
+  } catch { return false; }
+}
+
+function saveDriveMaterialsToStorage(materials: Record<string, GoogleDriveFile[]>): void {
+  localStorage.setItem('church_drive_materials', JSON.stringify(materials));
+}
+
+function loadDriveMaterialsFromStorage(): Record<string, GoogleDriveFile[]> {
+  try {
+    const saved = localStorage.getItem('church_drive_materials');
+    return saved ? JSON.parse(saved) : {};
+  } catch { return {}; }
 }
 
 // 성경 66권 한글 이름 (미니 게임 블록 표시용)
@@ -365,11 +514,21 @@ const TEACHER_CATEGORIES: TeacherCategory[] = [
   { id: 'slides', name: '교육용 PPT', Icon: Presentation, color: 'bg-orange-500', description: '예배 및 공과 시간에 활용하는 시각 자료' },
   { id: 'corner-learning', name: '코너학습 가이드', Icon: Gamepad2, color: 'bg-rose-500', description: '교육 테마별 활동 매뉴얼' },
   { id: 'talent-gifts', name: '보상 선물 명단', Icon: Gift, color: 'bg-amber-500', description: '학생별 보상 관리 및 시상 현황' },
-  { id: 'shop-admin', name: '상점 관리', Icon: ShoppingBag, color: 'bg-emerald-600', description: '상점 아이템 추가 및 가격 설정' },
   { id: 'mission-confirm', name: '오늘의 미션 확인', Icon: CheckCircle2, color: 'bg-teal-600', description: '학생이 한 미션을 확인하고 보상 부여' },
-  { id: 'logged-in-students', name: '로그인한 학생 명단', Icon: Users, color: 'bg-sky-600', description: 'Supabase 연동 후 로그인한 학생 목록' },
-  { id: 'class-management', name: '반별 관리', Icon: Map, color: 'bg-violet-600', description: '반 생성 및 학생 반 배정' },
+  { id: 'logged-in-students', name: '로그인한 학생 명단', Icon: Users, color: 'bg-sky-600', description: '로그인한 학생 목록' },
+];
+
+const ADMIN_CATEGORIES: TeacherCategory[] = [
   { id: 'church-settings', name: '교회 설정', Icon: Settings, color: 'bg-gray-600', description: '교회명, 비밀번호, 선생님 관리' },
+  { id: 'shop-admin', name: '상점 관리', Icon: ShoppingBag, color: 'bg-emerald-600', description: '상점 아이템 추가 및 가격 설정' },
+  { id: 'class-management', name: '반별 관리', Icon: Map, color: 'bg-violet-600', description: '반 생성 및 학생 반 배정' },
+  { id: 'logged-in-students', name: '로그인한 학생 명단', Icon: Users, color: 'bg-sky-600', description: '로그인한 학생 목록' },
+  { id: 'teacher-manual', name: '교사용 지도안', Icon: Library, color: 'bg-slate-700', description: '체계적인 공과 지도를 위한 가이드라인' },
+  { id: 'teacher-workbook', name: '학생용 활동지', Icon: Pencil, color: 'bg-indigo-600', description: '학생들의 참여를 이끄는 워크북 자료' },
+  { id: 'slides', name: '교육용 PPT', Icon: Presentation, color: 'bg-orange-500', description: '예배 및 공과 시간에 활용하는 시각 자료' },
+  { id: 'corner-learning', name: '코너학습 가이드', Icon: Gamepad2, color: 'bg-rose-500', description: '교육 테마별 활동 매뉴얼' },
+  { id: 'talent-gifts', name: '보상 선물 명단', Icon: Gift, color: 'bg-amber-500', description: '학생별 보상 관리 및 시상 현황' },
+  { id: 'mission-confirm', name: '오늘의 미션 확인', Icon: CheckCircle2, color: 'bg-teal-600', description: '학생이 한 미션을 확인하고 보상 부여' },
 ];
 
 const STICKERS = [
@@ -398,9 +557,21 @@ const App: React.FC = () => {
   const [setupStep, setSetupStep] = useState(0);
   const [setupConfig, setSetupConfig] = useState<ChurchConfig>({ ...DEFAULT_CHURCH_CONFIG });
 
+  // ── 멀티디바이스 연결 상태 ──
+  const [apiUrl, setApiUrl] = useState<string>(() => localStorage.getItem('church_api_url') || '');
+  const connectionMode: 'local' | 'cloud' = apiUrl ? 'cloud' : 'local';
+  const [currentStudentId, setCurrentStudentId] = useState<string | null>(null);
+  const [cloudOnline, setCloudOnline] = useState(true);
+  const [setupApiUrl, setSetupApiUrl] = useState('');
+  const [setupApiTesting, setSetupApiTesting] = useState(false);
+  const [setupApiResult, setSetupApiResult] = useState<'success' | 'fail' | null>(null);
+
   const updateChurchConfig = (newConfig: ChurchConfig) => {
     setChurchConfig(newConfig);
     saveChurchConfig(newConfig);
+    if (connectionMode === 'cloud' && apiUrl) {
+      gasPost(apiUrl, { action: 'updateConfig', config: newConfig }).catch(console.error);
+    }
   };
 
   const updateTeachers = (newTeachers: Teacher[]) => {
@@ -425,12 +596,19 @@ const App: React.FC = () => {
   const [showNamePrompt, setShowNamePrompt] = useState(false);
   const [tempName, setTempName] = useState('');
 
-  const [isTeacherAuthenticated, setIsTeacherAuthenticated] = useState(false);
-  const [isAdmin, setIsAdmin] = useState(false);
+  const [isTeacherAuthenticated, setIsTeacherAuthenticated] = useState<boolean>(() => {
+    const saved = localStorage.getItem('church_admin_session');
+    return saved === churchConfig.adminPassword;
+  });
+  const [isAdmin, setIsAdmin] = useState<boolean>(() => {
+    const saved = localStorage.getItem('church_admin_session');
+    return saved === churchConfig.adminPassword;
+  });
   const [showTeacherAuthModal, setShowTeacherAuthModal] = useState(false);
   const [teacherPassword, setTeacherPassword] = useState('');
   const [authRoleChoice, setAuthRoleChoice] = useState<'student' | 'teacher' | 'admin' | null>(null);
   const [selectedTeacherCategory, setSelectedTeacherCategory] = useState<TeacherCategory | null>(null);
+  const [selectedAdminCategory, setSelectedAdminCategory] = useState<TeacherCategory | null>(null);
 
   // 교사 라운지 학생 명단 상태
   const [students, setStudents] = useState<Student[]>(() => {
@@ -476,6 +654,14 @@ const App: React.FC = () => {
   });
 
   const [materialsList, setMaterialsList] = useState<Record<string, { name: string; file: string }[]>>({});
+
+  // Google Drive state
+  const [gDriveState, setGDriveState] = useState<GoogleDriveState>({
+    isSignedIn: false, accessToken: null, userEmail: null, appFolderId: null, categoryFolderIds: {},
+  });
+  const [gDriveLoading, setGDriveLoading] = useState(false);
+  const [gDriveMaterials, setGDriveMaterials] = useState<Record<string, GoogleDriveFile[]>>(() => loadDriveMaterialsFromStorage());
+  const tokenClientRef = useRef<any>(null);
 
   const [challenges, setChallenges] = useState<Challenge[]>(() => {
     const saved = localStorage.getItem('church_challenges');
@@ -545,24 +731,25 @@ const App: React.FC = () => {
   const materialFileInputRef = useRef<HTMLInputElement>(null);
 
   const [selectedTopic, setSelectedTopic] = useState<Topic | null>(null);
-  const [activeTab, setActiveTab] = useState<'info' | 'deep' | 'meaning' | 'shop' | 'teacher'>('info');
+  const [activeTab, setActiveTab] = useState<'info' | 'deep' | 'meaning' | 'shop' | 'teacher' | 'admin'>('info');
   const [showClassListView, setShowClassListView] = useState(false);
+  const [expandedClassId, setExpandedClassId] = useState<string | null>(null);
 
   useEffect(() => {
-    localStorage.setItem('church_talents', talents.toString());
-  }, [talents]);
+    if (connectionMode === 'local') localStorage.setItem('church_talents', talents.toString());
+  }, [talents, connectionMode]);
 
   useEffect(() => {
-    localStorage.setItem('church_missions', JSON.stringify(completedMissions));
-  }, [completedMissions]);
+    if (connectionMode === 'local') localStorage.setItem('church_missions', JSON.stringify(completedMissions));
+  }, [completedMissions, connectionMode]);
 
   useEffect(() => {
-    localStorage.setItem('church_stickers', JSON.stringify(ownedStickers));
-  }, [ownedStickers]);
+    if (connectionMode === 'local') localStorage.setItem('church_stickers', JSON.stringify(ownedStickers));
+  }, [ownedStickers, connectionMode]);
 
   useEffect(() => {
-    localStorage.setItem('church_user_name', userName);
-  }, [userName]);
+    if (connectionMode === 'local') localStorage.setItem('church_user_name', userName);
+  }, [userName, connectionMode]);
 
   useEffect(() => {
     localStorage.setItem('church_students', JSON.stringify(students));
@@ -581,8 +768,8 @@ const App: React.FC = () => {
   }, [challenges]);
 
   useEffect(() => {
-    localStorage.setItem('church_completed_challenges', JSON.stringify(completedChallenges));
-  }, [completedChallenges]);
+    if (connectionMode === 'local') localStorage.setItem('church_completed_challenges', JSON.stringify(completedChallenges));
+  }, [completedChallenges, connectionMode]);
 
   useEffect(() => {
     localStorage.setItem('church_pending_missions', JSON.stringify(pendingMissionCompletions));
@@ -591,6 +778,42 @@ const App: React.FC = () => {
   useEffect(() => {
     localStorage.setItem('church_blocked_students', JSON.stringify(blockedStudentIds));
   }, [blockedStudentIds]);
+
+  // ── Cloud 모드: 10초마다 공유 데이터 폴링 ──
+  useEffect(() => {
+    if (connectionMode !== 'cloud' || !apiUrl) return;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const shared = await gasGet(apiUrl, { action: 'getSharedData' });
+        if (cancelled) return;
+        setCloudOnline(true);
+        if (shared.students) setStudents(shared.students);
+        if (shared.classes) setClasses(shared.classes);
+        if (shared.shopItems?.length > 0) setShopItems(shared.shopItems);
+        if (shared.challenges?.length > 0) setChallenges(shared.challenges);
+        if (shared.pendingMissions) setPendingMissionCompletions(shared.pendingMissions);
+        if (shared.sessions) setLoggedInStudents(shared.sessions);
+        if (shared.teachers) setTeachersState(shared.teachers);
+        if (shared.students) setBlockedStudentIds(shared.students.filter((s: any) => s.blocked === true || s.blocked === 'true').map((s: any) => s.id));
+        // 현재 로그인한 학생의 최신 데이터 반영
+        if (currentStudentId && shared.students) {
+          const me = shared.students.find((s: any) => s.id === currentStudentId);
+          if (me) {
+            setTalents(Number(me.talents) || 0);
+            if (me.completedMissions) setCompletedMissions(me.completedMissions);
+            if (me.ownedStickers) setOwnedStickers(me.ownedStickers);
+            if (me.completedChallenges) setCompletedChallenges(me.completedChallenges);
+          }
+        }
+      } catch {
+        if (!cancelled) setCloudOnline(false);
+      }
+    };
+    poll();
+    const interval = setInterval(poll, 10000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [connectionMode, apiUrl, currentStudentId]);
 
   useEffect(() => {
     fetchMaterials().then(setMaterialsList).catch(() => setMaterialsList({}));
@@ -629,14 +852,28 @@ const App: React.FC = () => {
     };
   }, [showFeedback, currentQuizIndex, isQuizMode]);
 
-  const handleSaveName = () => {
-    if (tempName.trim()) {
-      const name = tempName.trim();
+  const handleSaveName = async () => {
+    if (!tempName.trim()) { alert("이름을 입력해주세요!"); return; }
+    const name = tempName.trim();
+
+    if (connectionMode === 'cloud' && apiUrl) {
+      try {
+        const result = await gasPost(apiUrl, { action: 'login', name });
+        if (result.blocked) { alert('차단된 계정이에요.'); return; }
+        setUserName(name);
+        setCurrentStudentId(result.id);
+        setTalents(Number(result.talents) || 0);
+        setCompletedMissions(result.completedMissions || []);
+        setOwnedStickers(result.ownedStickers || []);
+        setCompletedChallenges(result.completedChallenges || []);
+        setShowNamePrompt(false);
+        if (result.firstLoginBonus) {
+          setTimeout(() => alert(`첫 로그인 선물로 ${result.firstLoginBonus} ${churchConfig.currencyName}가 지급되었어요!`), 100);
+        }
+      } catch (err) { alert('로그인 실패: ' + (err as Error).message); }
+    } else {
       const existingLogin = loggedInStudents.find(s => s.name === name);
-      if (existingLogin && blockedStudentIds.includes(existingLogin.id)) {
-        alert('차단된 계정이에요.');
-        return;
-      }
+      if (existingLogin && blockedStudentIds.includes(existingLogin.id)) { alert('차단된 계정이에요.'); return; }
       setUserName(name);
       setShowNamePrompt(false);
       if (!localStorage.getItem('church_first_login_done')) {
@@ -651,29 +888,40 @@ const App: React.FC = () => {
         localStorage.setItem('church_logged_in_students', JSON.stringify(next));
         return next;
       });
-    } else {
-      alert("이름을 입력해주세요!");
     }
   };
 
   const handleLogout = () => {
     if (confirm("로그아웃 하시겠습니까?")) {
       setUserName('');
+      setCurrentStudentId(null);
       setIsTeacherAuthenticated(false);
-      localStorage.removeItem('church_user_name');
+      if (connectionMode === 'local') localStorage.removeItem('church_user_name');
     }
   };
 
   const addTalents = (amount: number) => {
     setTalents(prev => prev + amount);
+    if (connectionMode === 'cloud' && apiUrl && currentStudentId) {
+      gasPost(apiUrl, { action: 'addTalents', studentId: currentStudentId, amount }).catch(err => {
+        console.error('Talent sync failed:', err);
+        setTalents(prev => prev - amount);
+      });
+    }
   };
 
   const toggleMission = (missionId: string) => {
     if (completedMissions.includes(missionId)) {
       setCompletedMissions(prev => prev.filter(id => id !== missionId));
-      setPendingMissionCompletions(prev => prev.filter(p => p.studentName === userName && p.missionId === missionId));
+      setPendingMissionCompletions(prev => prev.filter(p => !(p.studentName === userName && p.missionId === missionId)));
+      if (connectionMode === 'cloud' && apiUrl && currentStudentId) {
+        gasPost(apiUrl, { action: 'uncompleteMission', studentId: currentStudentId, missionId }).catch(console.error);
+      }
     } else {
       setCompletedMissions(prev => [...prev, missionId]);
+      if (connectionMode === 'cloud' && apiUrl && currentStudentId) {
+        gasPost(apiUrl, { action: 'completeMission', studentId: currentStudentId, missionId }).catch(console.error);
+      }
       if (!userName) return;
       const parts = missionId.split('-m-');
       if (parts.length !== 2) return;
@@ -681,7 +929,7 @@ const App: React.FC = () => {
       const topic = THEOLOGY_TOPICS.find(t => t.id === topicId);
       const missionText = topic?.missions[parseInt(idxStr, 10)] ?? '';
       const topicTitle = topic?.title ?? '';
-      const studentId = loggedInStudents.find(s => s.name === userName)?.id ?? userName;
+      const studentId = currentStudentId || loggedInStudents.find(s => s.name === userName)?.id || userName;
       const newItem: PendingMissionCompletion = {
         id: (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : Date.now().toString(),
         studentId,
@@ -693,25 +941,44 @@ const App: React.FC = () => {
         createdAt: new Date().toISOString(),
       };
       setPendingMissionCompletions(prev => [...prev, newItem]);
+      if (connectionMode === 'cloud' && apiUrl) {
+        gasPost(apiUrl, { action: 'submitMission', data: newItem }).catch(console.error);
+      }
     }
   };
 
   const buySticker = (stickerId: string, price: number) => {
     if (ownedStickers.includes(stickerId)) return;
-    if (talents < price) {
-      alert(`${churchConfig.currencyName}가 부족해요!`);
-      return;
-    }
+    if (talents < price) { alert(`${churchConfig.currencyName}가 부족해요!`); return; }
     setTalents(prev => prev - price);
     setOwnedStickers(prev => [...prev, stickerId]);
+    if (connectionMode === 'cloud' && apiUrl && currentStudentId) {
+      gasPost(apiUrl, { action: 'buySticker', studentId: currentStudentId, stickerId, price }).catch(err => {
+        setTalents(prev => prev + price);
+        setOwnedStickers(prev => prev.filter(id => id !== stickerId));
+        alert('구매 실패: ' + (err as Error).message);
+      });
+    }
   };
 
   const resetMyTalents = () => {
     if (!confirm(`내 ${churchConfig.currencyName}와 수집한 스티커를 모두 초기화할까요?`)) return;
     setTalents(0);
     setOwnedStickers([]);
-    localStorage.setItem('church_talents', '0');
-    localStorage.setItem('church_stickers', '[]');
+    if (connectionMode === 'local') {
+      localStorage.setItem('church_talents', '0');
+      localStorage.setItem('church_stickers', '[]');
+    }
+    if (connectionMode === 'cloud' && apiUrl && currentStudentId) {
+      gasPost(apiUrl, { action: 'writeRecord', table: 'students', data: { id: currentStudentId, name: userName, talents: 0, classId: '', completedMissions, ownedStickers: [], completedChallenges, firstLoginDone: true, blocked: false } }).catch(console.error);
+    }
+  };
+
+  const markChallengeComplete = (challengeId: string) => {
+    setCompletedChallenges(prev => [...prev, challengeId]);
+    if (connectionMode === 'cloud' && apiUrl && currentStudentId) {
+      gasPost(apiUrl, { action: 'completeChallenge', studentId: currentStudentId, challengeId }).catch(console.error);
+    }
   };
 
   const resetStudentTalents = (id: string) => {
@@ -754,17 +1021,68 @@ const App: React.FC = () => {
       setActiveTab('teacher');
       setSelectedTopic(null);
     } else {
-      setAuthRoleChoice(null);
+      setAuthRoleChoice('teacher');
+      setShowTeacherAuthModal(true);
+    }
+  };
+
+
+  const handleAdminRoomClick = () => {
+    if (isAdmin) {
+      setActiveTab('admin');
+      setSelectedTopic(null);
+    } else {
+      setAuthRoleChoice('admin');
       setShowTeacherAuthModal(true);
     }
   };
 
   const uploadMaterial = async (categoryId: string, file: File): Promise<void> => {
-    const blobUrl = URL.createObjectURL(file);
-    setMaterialsList(prev => ({
-      ...prev,
-      [categoryId]: [...(prev[categoryId] || []), { name: file.name, file: blobUrl }]
-    }));
+    if (connectionMode === 'cloud' && apiUrl) {
+      setGDriveLoading(true);
+      try {
+        const base64 = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => { const result = reader.result as string; resolve(result.split(',')[1]); };
+          reader.onerror = reject;
+          reader.readAsDataURL(file);
+        });
+        const res = await gasPost(apiUrl, { action: 'uploadFile', categoryId, fileName: file.name, base64Data: base64, mimeType: file.type });
+        if (res.ok && res.file) {
+          setGDriveMaterials(prev => {
+            const updated = { ...prev, [categoryId]: [res.file, ...(prev[categoryId] || [])] };
+            saveDriveMaterialsToStorage(updated);
+            return updated;
+          });
+        } else {
+          alert('업로드 실패: ' + (res.error || '알 수 없는 오류'));
+        }
+      } catch (err) {
+        alert('업로드 실패: ' + (err as Error).message);
+      } finally {
+        setGDriveLoading(false);
+      }
+    } else if (gDriveState.isSignedIn && gDriveState.accessToken && gDriveState.categoryFolderIds[categoryId]) {
+      setGDriveLoading(true);
+      try {
+        const driveFile = await uploadFileToDrive(gDriveState.accessToken, file, gDriveState.categoryFolderIds[categoryId]);
+        setGDriveMaterials(prev => {
+          const updated = { ...prev, [categoryId]: [driveFile, ...(prev[categoryId] || [])] };
+          saveDriveMaterialsToStorage(updated);
+          return updated;
+        });
+      } catch (err) {
+        alert('Google Drive 업로드 실패: ' + (err as Error).message);
+      } finally {
+        setGDriveLoading(false);
+      }
+    } else {
+      const blobUrl = URL.createObjectURL(file);
+      setMaterialsList(prev => ({
+        ...prev,
+        [categoryId]: [...(prev[categoryId] || []), { name: file.name, file: blobUrl }]
+      }));
+    }
   };
 
   const deleteMaterial = async (categoryId: string, itemKeyOrIndex: string | number): Promise<void> => {
@@ -781,26 +1099,183 @@ const App: React.FC = () => {
     });
   };
 
+  const handleDeleteDriveFile = async (categoryId: string, fileId: string) => {
+    if (!confirm('이 자료를 삭제하시겠어요?')) return;
+    setGDriveLoading(true);
+    try {
+      if (connectionMode === 'cloud' && apiUrl) {
+        await gasPost(apiUrl, { action: 'deleteFile', fileId });
+      } else if (gDriveState.accessToken) {
+        await deleteDriveFile(gDriveState.accessToken, fileId);
+      }
+      setGDriveMaterials(prev => {
+        const updated = { ...prev, [categoryId]: (prev[categoryId] || []).filter(f => f.id !== fileId) };
+        saveDriveMaterialsToStorage(updated);
+        return updated;
+      });
+    } catch (err) {
+      alert('삭제 실패: ' + (err as Error).message);
+    } finally {
+      setGDriveLoading(false);
+    }
+  };
+
+  const connectGoogleDrive = () => {
+    if (connectionMode === 'cloud' && apiUrl) {
+      alert('Cloud 모드에서는 Google Drive가 자동으로 연결되어 있습니다. 교사 라운지에서 자료를 올리고 내릴 수 있습니다.');
+      return;
+    }
+    if (connectionMode === 'local') {
+      if (confirm('Google Drive 자료 관리는 Cloud 모드에서만 사용 가능합니다.\n\nCloud 설정을 시작할까요?')) {
+        setSetupStep(3);
+        setSetupConfig({ ...churchConfig });
+        setShowSetupWizard(true);
+      }
+      return;
+    }
+    const clientId = process.env.GOOGLE_CLIENT_ID;
+    if (!clientId || !window.google?.accounts?.oauth2) {
+      alert('Google Drive 연결이 불가합니다. Cloud 모드를 사용해 주세요.');
+      return;
+    }
+    tokenClientRef.current = window.google.accounts.oauth2.initTokenClient({
+      client_id: clientId,
+      scope: 'https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/userinfo.email',
+      callback: async (response: any) => {
+        if (!response.access_token) return;
+        const accessToken = response.access_token;
+        setGDriveLoading(true);
+        try {
+          const userInfo = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', {
+            headers: { 'Authorization': `Bearer ${accessToken}` }
+          }).then(r => r.json());
+          const folderName = churchConfig.departmentName || churchConfig.churchName || 'Church Education App';
+          const { appFolderId, categoryFolderIds } = await initDriveFolders(accessToken, folderName);
+          updateChurchConfig({ ...churchConfig, googleDriveAppFolderId: appFolderId, googleDriveCategoryFolderIds: categoryFolderIds });
+          setGDriveState({ isSignedIn: true, accessToken, userEmail: userInfo.email, appFolderId, categoryFolderIds });
+          const materials: Record<string, GoogleDriveFile[]> = {};
+          for (const [catId, folderId] of Object.entries(categoryFolderIds)) {
+            materials[catId] = await listDriveFiles(accessToken, folderId);
+          }
+          setGDriveMaterials(materials);
+          saveDriveMaterialsToStorage(materials);
+        } catch (err) {
+          alert('Google Drive 연결 실패: ' + (err as Error).message);
+        } finally {
+          setGDriveLoading(false);
+        }
+      },
+    });
+    tokenClientRef.current.requestAccessToken({ prompt: 'consent' });
+  };
+
+  const disconnectGoogleDrive = () => {
+    if (gDriveState.accessToken && window.google?.accounts?.oauth2) {
+      window.google.accounts.oauth2.revoke(gDriveState.accessToken, () => {});
+    }
+    setGDriveState({ isSignedIn: false, accessToken: null, userEmail: null, appFolderId: null, categoryFolderIds: {} });
+  };
+
+  const refreshDriveMaterials = async () => {
+    setGDriveLoading(true);
+    try {
+      const materials: Record<string, GoogleDriveFile[]> = {};
+      if (connectionMode === 'cloud' && apiUrl) {
+        for (const catId of MATERIAL_CATEGORY_IDS) {
+          const res = await gasGet(apiUrl, { action: 'listFiles', categoryId: catId });
+          materials[catId] = res.files || [];
+        }
+      } else if (gDriveState.isSignedIn && gDriveState.accessToken) {
+        for (const [catId, folderId] of Object.entries(gDriveState.categoryFolderIds) as [string, string][]) {
+          materials[catId] = await listDriveFiles(gDriveState.accessToken!, folderId);
+        }
+      } else {
+        setGDriveLoading(false);
+        return;
+      }
+      setGDriveMaterials(materials);
+      saveDriveMaterialsToStorage(materials);
+    } catch { /* ignore */ } finally {
+      setGDriveLoading(false);
+    }
+  };
+
+  const adminGoogleLogin = () => {
+    const clientId = process.env.GOOGLE_CLIENT_ID;
+    if (!clientId || !window.google?.accounts?.oauth2) {
+      alert('Google 로그인을 사용할 수 없습니다. 비밀번호를 사용하세요.');
+      return;
+    }
+    tokenClientRef.current = window.google.accounts.oauth2.initTokenClient({
+      client_id: clientId,
+      scope: 'https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/userinfo.email',
+      callback: async (response: any) => {
+        if (!response.access_token) return;
+        try {
+          const userInfo = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', {
+            headers: { 'Authorization': `Bearer ${response.access_token}` }
+          }).then(r => r.json());
+          // 관리자 이메일 확인
+          if (connectionMode === 'cloud' && apiUrl) {
+            const config = await gasGet(apiUrl, { action: 'getConfig' });
+            if (config.adminEmail && config.adminEmail !== userInfo.email) {
+              alert('등록된 관리자 이메일이 아닙니다: ' + config.adminEmail);
+              return;
+            }
+            if (!config.adminEmail) {
+              await gasPost(apiUrl, { action: 'updateConfig', config: { adminEmail: userInfo.email } });
+            }
+          }
+          setGDriveState({ isSignedIn: true, accessToken: response.access_token, userEmail: userInfo.email, appFolderId: null, categoryFolderIds: {} });
+          setIsTeacherAuthenticated(true);
+          setIsAdmin(true);
+          localStorage.setItem('church_admin_session', churchConfig.adminPassword);
+          setShowTeacherAuthModal(false);
+          setAuthRoleChoice(null);
+          setActiveTab('admin');
+          setSelectedTopic(null);
+        } catch (err) {
+          alert('Google 로그인 실패: ' + (err as Error).message);
+        }
+      },
+    });
+    tokenClientRef.current.requestAccessToken({ prompt: 'consent' });
+  };
+
   const verifyTeacherPassword = () => {
-    if (teacherPassword === churchConfig.adminPassword) {
-      setIsTeacherAuthenticated(true);
-      setIsAdmin(true);
-      setShowTeacherAuthModal(false);
-      setAuthRoleChoice(null);
-      setActiveTab('teacher');
-      setSelectedTopic(null);
-      setTeacherPassword('');
-    } else if (teacherPassword === churchConfig.teacherPassword) {
-      setIsTeacherAuthenticated(true);
-      setIsAdmin(false);
-      setShowTeacherAuthModal(false);
-      setAuthRoleChoice(null);
-      setActiveTab('teacher');
-      setSelectedTopic(null);
-      setTeacherPassword('');
+    if (authRoleChoice === 'admin' && connectionMode === 'cloud') {
+      adminGoogleLogin();
+      return;
+    }
+    if (authRoleChoice === 'admin') {
+      // 관리자 전용실: 관리자 비밀번호만 허용
+      if (teacherPassword === churchConfig.adminPassword) {
+        setIsTeacherAuthenticated(true);
+        setIsAdmin(true);
+        localStorage.setItem('church_admin_session', teacherPassword);
+        setShowTeacherAuthModal(false);
+        setAuthRoleChoice(null);
+        setActiveTab('admin');
+        setSelectedTopic(null);
+        setTeacherPassword('');
+      } else {
+        alert("관리자 비밀번호가 틀렸어요!");
+        setTeacherPassword('');
+      }
     } else {
-      alert("비밀번호가 틀렸어요!");
-      setTeacherPassword('');
+      // 교사 전용실: 교사 비밀번호 또는 관리자 비밀번호 허용 (단, 교사실에서는 항상 교사 권한)
+      if (teacherPassword === churchConfig.teacherPassword || teacherPassword === churchConfig.adminPassword) {
+        setIsTeacherAuthenticated(true);
+        setIsAdmin(false);
+        setShowTeacherAuthModal(false);
+        setAuthRoleChoice(null);
+        setActiveTab('teacher');
+        setSelectedTopic(null);
+        setTeacherPassword('');
+      } else {
+        alert("비밀번호가 틀렸어요!");
+        setTeacherPassword('');
+      }
     }
   };
 
@@ -816,9 +1291,24 @@ const App: React.FC = () => {
   const currentClass = currentStudent?.classId ? classes.find(c => c.id === currentStudent.classId) : null;
   const currentClassColor = currentClass ? getClassColor(currentClass.id) : null;
 
+  const handleAdminLogout = () => {
+    localStorage.removeItem('church_admin_session');
+    setIsAdmin(false);
+    setIsTeacherAuthenticated(false);
+    setSelectedTeacherCategory(null);
+    setSelectedAdminCategory(null);
+    setActiveTab('info');
+  };
+
+  // 현재 활성화된 카테고리 (교사/관리자 탭에 따라)
+  const currentCategories = activeTab === 'admin' ? ADMIN_CATEGORIES : TEACHER_CATEGORIES;
+  const selectedCategory = activeTab === 'admin' ? selectedAdminCategory : selectedTeacherCategory;
+  const setSelectedCategory = activeTab === 'admin' ? setSelectedAdminCategory : setSelectedTeacherCategory;
+
   const resetView = () => {
     setSelectedTopic(null);
     setSelectedTeacherCategory(null);
+    setSelectedAdminCategory(null);
     setSelectedChallengeRoom(false);
     setShowClassListView(false);
     setActiveTab('info');
@@ -967,6 +1457,9 @@ const App: React.FC = () => {
 
   const giveTalentToStudent = (id: string, amount: number) => {
     setStudents(prev => prev.map(s => s.id === id ? { ...s, talents: s.talents + amount } : s));
+    if (connectionMode === 'cloud' && apiUrl) {
+      gasPost(apiUrl, { action: 'giveTalents', studentId: id, amount }).catch(console.error);
+    }
   };
 
   const confirmMissionCompletion = (pendingId: string) => {
@@ -979,16 +1472,30 @@ const App: React.FC = () => {
       setStudents(prev => [...prev, { id: Date.now().toString(), name: pending.studentName, talents: 3, classId: null }]);
     }
     setPendingMissionCompletions(prev => prev.filter(p => p.id !== pendingId));
+    if (connectionMode === 'cloud' && apiUrl) {
+      gasPost(apiUrl, { action: 'approveMission', missionId: pendingId, talentReward: 3 }).catch(console.error);
+    }
   };
 
   const toggleBlockStudent = (loggedInStudentId: string) => {
-    setBlockedStudentIds(prev => prev.includes(loggedInStudentId) ? prev.filter(id => id !== loggedInStudentId) : [...prev, loggedInStudentId]);
+    const isBlocked = blockedStudentIds.includes(loggedInStudentId);
+    setBlockedStudentIds(prev => isBlocked ? prev.filter(id => id !== loggedInStudentId) : [...prev, loggedInStudentId]);
+    if (connectionMode === 'cloud' && apiUrl) {
+      // loggedInStudentId를 students에서 찾기
+      const student = students.find(s => s.id === loggedInStudentId) || loggedInStudents.find(s => s.id === loggedInStudentId);
+      if (student) {
+        gasPost(apiUrl, { action: isBlocked ? 'unblockStudent' : 'blockStudent', studentId: loggedInStudentId }).catch(console.error);
+      }
+    }
   };
 
   const giveBulkTalents = () => {
     if (students.length === 0) return;
     if (confirm(`모든 학생에게 1 ${churchConfig.currencyName}씩 선물할까요?`)) {
       setStudents(prev => prev.map(s => ({ ...s, talents: s.talents + 1 })));
+      if (connectionMode === 'cloud' && apiUrl) {
+        students.forEach(s => gasPost(apiUrl, { action: 'giveTalents', studentId: s.id, amount: 1 }).catch(console.error));
+      }
     }
   };
 
@@ -1111,20 +1618,54 @@ const App: React.FC = () => {
   }, [tetrisGameStarted, tetrisGameOver]);
 
   return (
-    <div className="min-h-screen pb-20 overflow-x-hidden text-slate-800 bg-sky-50/50 border-l-0 outline-none [outline:0]">
+    <div className="min-h-screen flex flex-col overflow-x-hidden text-slate-800 bg-sky-50/50 border-l-0 outline-none [outline:0]">
       {/* Setup Wizard */}
       {showSetupWizard && (
-        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-gradient-to-br from-sky-400 to-sky-600 p-6">
+        <div className="flex-1 flex items-center justify-center bg-gradient-to-br from-sky-400 to-sky-600 p-6">
           <div className="bg-white p-8 rounded-[40px] shadow-2xl w-full max-w-md space-y-6 animate-in zoom-in-95 duration-300">
             {setupStep === 0 && (
               <div className="space-y-6 text-center">
                 <div className="w-20 h-20 bg-sky-100 rounded-3xl flex items-center justify-center mx-auto text-sky-500"><Sparkles className="w-10 h-10" /></div>
                 <h3 className="text-2xl font-black text-sky-900">환영합니다!</h3>
-                <p className="text-slate-500 font-bold">우리 교회에 맞게 앱을 설정해 볼까요?<br/>나중에 관리자 설정에서 변경할 수 있어요.</p>
-                <div className="flex gap-3">
-                  <button onClick={() => { saveChurchConfig(DEFAULT_CHURCH_CONFIG); setShowSetupWizard(false); }} className="flex-1 py-4 bg-slate-100 text-slate-500 rounded-[24px] font-bold">건너뛰기</button>
-                  <button onClick={() => setSetupStep(1)} className="flex-2 py-4 bg-sky-500 text-white rounded-[24px] font-black shadow-lg shadow-sky-100">설정 시작</button>
+                <p className="text-slate-500 font-bold">우리 교회에 맞게 앱을 설정해 볼까요?</p>
+                <div className="space-y-3">
+                  <button onClick={() => setSetupStep(1)} className="w-full py-4 bg-sky-500 text-white rounded-[24px] font-black shadow-lg shadow-sky-100">새로 시작하기</button>
+                  <button onClick={() => setSetupStep(10)} className="w-full py-4 bg-blue-600 text-white rounded-[24px] font-black shadow-lg shadow-blue-100">기존 교회에 연결</button>
+                  <button onClick={() => { saveChurchConfig(DEFAULT_CHURCH_CONFIG); setShowSetupWizard(false); }} className="w-full py-3 bg-slate-100 text-slate-500 rounded-[24px] font-bold">건너뛰기 (이 기기만 사용)</button>
                 </div>
+              </div>
+            )}
+            {/* 기존 교회 연결 화면 */}
+            {setupStep === 10 && (
+              <div className="space-y-6">
+                <div className="text-center space-y-2">
+                  <h3 className="text-xl font-black text-sky-900">기존 교회에 연결</h3>
+                  <p className="text-slate-500 font-bold text-sm">관리자에게 받은 API URL을 붙여넣으세요</p>
+                </div>
+                <input type="text" value={setupApiUrl} onChange={(e) => { setSetupApiUrl(e.target.value); setSetupApiResult(null); }} placeholder="https://script.google.com/macros/s/..." className="w-full px-5 py-3.5 bg-slate-50 border-2 border-slate-100 rounded-2xl font-bold focus:border-sky-400 focus:outline-none text-sm" />
+                <button onClick={async () => {
+                  if (!setupApiUrl.trim()) return;
+                  setSetupApiTesting(true); setSetupApiResult(null);
+                  const ok = await testApiConnection(setupApiUrl.trim());
+                  setSetupApiTesting(false);
+                  if (ok) {
+                    setSetupApiResult('success');
+                    try {
+                      const config = await gasGet(setupApiUrl.trim(), { action: 'getConfig' });
+                      const merged = { ...DEFAULT_CHURCH_CONFIG, ...config, apiUrl: setupApiUrl.trim() };
+                      saveChurchConfig(merged);
+                      setChurchConfig(merged);
+                      setApiUrl(setupApiUrl.trim());
+                      localStorage.setItem('church_api_url', setupApiUrl.trim());
+                      setTimeout(() => setShowSetupWizard(false), 500);
+                    } catch { setSetupApiResult('fail'); }
+                  } else { setSetupApiResult('fail'); }
+                }} disabled={setupApiTesting || !setupApiUrl.trim()} className="w-full py-3.5 bg-blue-600 text-white rounded-2xl font-black flex items-center justify-center gap-2">
+                  {setupApiTesting ? <><Loader2 className="w-5 h-5 animate-spin" /> 연결 테스트 중...</> : '연결 테스트'}
+                </button>
+                {setupApiResult === 'success' && <p className="text-green-600 font-black text-center">연결 성공!</p>}
+                {setupApiResult === 'fail' && <p className="text-red-500 font-bold text-center">연결 실패. URL을 확인해주세요.</p>}
+                <button onClick={() => { setSetupStep(0); setSetupApiUrl(''); setSetupApiResult(null); }} className="w-full py-3 bg-slate-100 text-slate-500 rounded-2xl font-bold">이전</button>
               </div>
             )}
             {setupStep === 1 && (
@@ -1147,17 +1688,19 @@ const App: React.FC = () => {
             {setupStep === 2 && (
               <div className="space-y-6">
                 <div className="text-center space-y-2">
-                  <h3 className="text-xl font-black text-sky-900">2단계: 비밀번호</h3>
-                  <p className="text-slate-500 font-bold text-sm">교사와 관리자 비밀번호를 설정하세요</p>
+                  <h3 className="text-xl font-black text-sky-900">2단계: 비밀번호 설정</h3>
+                  <p className="text-slate-500 font-bold text-sm">관리자와 교사 비밀번호를 설정하세요</p>
                 </div>
-                <div className="space-y-3">
-                  <div>
-                    <label className="text-sm font-bold text-slate-500 mb-1 block">교사 비밀번호</label>
-                    <input type="text" value={setupConfig.teacherPassword} onChange={(e) => setSetupConfig(c => ({ ...c, teacherPassword: e.target.value }))} className="w-full px-5 py-3.5 bg-slate-50 border-2 border-slate-100 rounded-2xl font-bold focus:border-sky-400 focus:outline-none" />
+                <div className="space-y-4">
+                  <div className="p-4 bg-slate-800 rounded-2xl space-y-2">
+                    <label className="text-sm font-black text-white flex items-center gap-2"><Lock className="w-4 h-4" /> 관리자 비밀번호</label>
+                    <input type="text" value={setupConfig.adminPassword} onChange={(e) => setSetupConfig(c => ({ ...c, adminPassword: e.target.value }))} placeholder="관리자 비밀번호 입력" className="w-full px-5 py-3.5 bg-white border-2 border-slate-200 rounded-2xl font-bold focus:border-sky-400 focus:outline-none text-center text-lg tracking-widest" />
+                    <p className="text-xs text-slate-400 font-medium">모든 설정과 관리 권한을 가진 최고 관리자용</p>
                   </div>
-                  <div>
-                    <label className="text-sm font-bold text-slate-500 mb-1 block">관리자 비밀번호</label>
-                    <input type="text" value={setupConfig.adminPassword} onChange={(e) => setSetupConfig(c => ({ ...c, adminPassword: e.target.value }))} className="w-full px-5 py-3.5 bg-slate-50 border-2 border-slate-100 rounded-2xl font-bold focus:border-sky-400 focus:outline-none" />
+                  <div className="p-4 bg-indigo-50 rounded-2xl space-y-2 border-2 border-indigo-100">
+                    <label className="text-sm font-black text-indigo-700 flex items-center gap-2"><KeyRound className="w-4 h-4" /> 교사 비밀번호</label>
+                    <input type="text" value={setupConfig.teacherPassword} onChange={(e) => setSetupConfig(c => ({ ...c, teacherPassword: e.target.value }))} placeholder="교사 비밀번호 입력" className="w-full px-5 py-3.5 bg-white border-2 border-indigo-200 rounded-2xl font-bold focus:border-indigo-400 focus:outline-none text-center text-lg tracking-widest" />
+                    <p className="text-xs text-indigo-400 font-medium">자료 열람, 미션 확인, 보상 지급용</p>
                   </div>
                 </div>
                 <div className="flex gap-3">
@@ -1179,10 +1722,198 @@ const App: React.FC = () => {
                   <p><span className="font-black text-slate-600">교사 비밀번호:</span> <span className="font-bold text-sky-700">{setupConfig.teacherPassword}</span></p>
                   <p><span className="font-black text-slate-600">관리자 비밀번호:</span> <span className="font-bold text-sky-700">{setupConfig.adminPassword}</span></p>
                 </div>
-                <div className="flex gap-3">
-                  <button onClick={() => setSetupStep(2)} className="flex-1 py-3.5 bg-slate-100 text-slate-500 rounded-2xl font-bold">이전</button>
-                  <button onClick={() => { updateChurchConfig(setupConfig); setShowSetupWizard(false); }} className="flex-2 py-3.5 bg-sky-500 text-white rounded-2xl font-black shadow-lg shadow-sky-100">완료!</button>
+                <div className="space-y-3">
+                  <button onClick={() => { updateChurchConfig(setupConfig); setShowSetupWizard(false); }} className="w-full py-3.5 bg-sky-500 text-white rounded-2xl font-black shadow-lg shadow-sky-100">이 기기에서만 사용</button>
+                  <button onClick={() => { updateChurchConfig(setupConfig); setSetupStep(4); }} className="w-full py-3.5 bg-blue-600 text-white rounded-2xl font-black shadow-lg shadow-blue-100">여러 기기에서 사용 (Cloud 설정)</button>
+                  <button onClick={() => setSetupStep(2)} className="w-full py-3 bg-slate-100 text-slate-500 rounded-2xl font-bold">이전</button>
                 </div>
+              </div>
+            )}
+            {/* Cloud(Apps Script) 설정 */}
+            {setupStep === 4 && (
+              <div className="space-y-5">
+                <div className="text-center space-y-2">
+                  <div className="w-14 h-14 bg-blue-600 rounded-2xl flex items-center justify-center mx-auto text-white shadow-lg"><CloudUpload className="w-7 h-7" /></div>
+                  <h3 className="text-xl font-black text-sky-900">여러 기기 연동 설정</h3>
+                  <p className="text-slate-500 font-bold text-sm">
+                    {TEMPLATE_SHEET_ID ? '2단계만 따라하면 완료!' : '아래 순서대로 천천히 따라해 주세요'}
+                  </p>
+                </div>
+
+                {/* ── 템플릿이 있을 때: 복사 + 배포 + URL ── */}
+                {TEMPLATE_SHEET_ID ? (<>
+                  {/* Step 1: 템플릿 복사 */}
+                  <div className="rounded-2xl border-2 border-blue-200 overflow-hidden">
+                    <div className="bg-blue-600 text-white px-4 py-3 flex items-center gap-3">
+                      <span className="w-7 h-7 bg-white text-blue-600 rounded-full flex items-center justify-center text-sm font-black shrink-0">1</span>
+                      <span className="font-black">내 Google Sheet 만들기 (1클릭)</span>
+                    </div>
+                    <div className="p-4 bg-blue-50 space-y-3">
+                      <p className="text-sm font-bold text-slate-600">아래 버튼을 누르면 모든 코드가 포함된 Google Sheet가 자동으로 만들어집니다.</p>
+                      <button onClick={() => window.open(`https://docs.google.com/spreadsheets/d/${TEMPLATE_SHEET_ID}/copy`, '_blank')} className="w-full py-3.5 bg-blue-600 text-white rounded-xl font-black hover:bg-blue-700 transition-colors flex items-center justify-center gap-2 text-base shadow-lg">
+                        <ExternalLink className="w-5 h-5" /> Google Sheet 복사하기
+                      </button>
+                      <div className="bg-white rounded-xl p-3 border border-blue-100 space-y-1.5">
+                        <p className="text-xs font-bold text-slate-600">복사 후 해야 할 것:</p>
+                        <div className="flex items-start gap-2">
+                          <span className="w-4 h-4 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center text-[10px] font-black shrink-0 mt-0.5">a</span>
+                          <p className="text-xs font-bold text-slate-700">"사본 만들기" 클릭</p>
+                        </div>
+                        <div className="flex items-start gap-2">
+                          <span className="w-4 h-4 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center text-[10px] font-black shrink-0 mt-0.5">b</span>
+                          <p className="text-xs font-bold text-slate-700">복사된 시트에서 <span className="px-1.5 py-0.5 bg-slate-800 text-white rounded text-[10px] font-black">확장 프로그램</span> → <span className="px-1.5 py-0.5 bg-slate-800 text-white rounded text-[10px] font-black">Apps Script</span> 클릭</p>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Step 2: 배포 + URL */}
+                  <div className="rounded-2xl border-2 border-green-200 overflow-hidden">
+                    <div className="bg-green-600 text-white px-4 py-3 flex items-center gap-3">
+                      <span className="w-7 h-7 bg-white text-green-600 rounded-full flex items-center justify-center text-sm font-black shrink-0">2</span>
+                      <span className="font-black">배포하고 URL 입력</span>
+                    </div>
+                    <div className="p-4 bg-green-50 space-y-3">
+                      <div className="bg-white rounded-xl p-3 space-y-2 border border-green-100">
+                        <div className="flex items-start gap-2">
+                          <span className="w-5 h-5 bg-green-100 text-green-600 rounded-full flex items-center justify-center text-xs font-black shrink-0 mt-0.5">a</span>
+                          <p className="text-sm font-bold text-slate-700">Apps Script 화면에서 <span className="px-2 py-0.5 bg-blue-600 text-white rounded text-xs font-black">배포</span> → <span className="px-2 py-0.5 bg-slate-800 text-white rounded text-xs font-black">새 배포</span></p>
+                        </div>
+                        <div className="flex items-start gap-2">
+                          <span className="w-5 h-5 bg-green-100 text-green-600 rounded-full flex items-center justify-center text-xs font-black shrink-0 mt-0.5">b</span>
+                          <p className="text-sm font-bold text-slate-700">톱니바퀴 → <span className="px-2 py-0.5 bg-slate-800 text-white rounded text-xs font-black">웹 앱</span> → 액세스: <span className="px-2 py-0.5 bg-red-500 text-white rounded text-xs font-black">모든 사용자</span></p>
+                        </div>
+                        <div className="flex items-start gap-2">
+                          <span className="w-5 h-5 bg-green-100 text-green-600 rounded-full flex items-center justify-center text-xs font-black shrink-0 mt-0.5">c</span>
+                          <p className="text-sm font-bold text-slate-700"><span className="px-2 py-0.5 bg-blue-600 text-white rounded text-xs font-black">배포</span> → 승인 → 나온 URL 복사</p>
+                        </div>
+                      </div>
+                      <div className="bg-amber-50 border border-amber-200 rounded-xl p-2.5">
+                        <p className="text-xs font-bold text-amber-700">"확인되지 않은 앱" 경고 → <span className="font-black">고급 → 이동</span> 클릭하세요</p>
+                      </div>
+                      <input type="text" value={setupApiUrl} onChange={(e) => { setSetupApiUrl(e.target.value); setSetupApiResult(null); }} placeholder="https://script.google.com/macros/s/..." className="w-full px-4 py-3.5 bg-white border-2 border-green-300 rounded-xl font-bold focus:border-green-500 focus:outline-none text-sm" />
+                      <button onClick={async () => {
+                        if (!setupApiUrl.trim()) return;
+                        setSetupApiTesting(true); setSetupApiResult(null);
+                        const ok = await testApiConnection(setupApiUrl.trim());
+                        setSetupApiTesting(false);
+                        if (ok) {
+                          setSetupApiResult('success');
+                          const url = setupApiUrl.trim();
+                          setApiUrl(url);
+                          localStorage.setItem('church_api_url', url);
+                          updateChurchConfig({ ...churchConfig, apiUrl: url });
+                          await gasPost(url, { action: 'updateConfig', config: churchConfig }).catch(console.error);
+                          setTimeout(() => setShowSetupWizard(false), 800);
+                        } else { setSetupApiResult('fail'); }
+                      }} disabled={setupApiTesting || !setupApiUrl.trim()} className="w-full py-3.5 bg-green-600 text-white rounded-xl font-black flex items-center justify-center gap-2 hover:bg-green-700 transition-colors text-base">
+                        {setupApiTesting ? <><Loader2 className="w-5 h-5 animate-spin" /> 연결 테스트 중...</> : <><CheckCircle2 className="w-5 h-5" /> 연결 테스트 & 완료</>}
+                      </button>
+                      {setupApiResult === 'success' && <div className="text-center py-2"><p className="text-green-600 font-black text-lg">연결 성공!</p></div>}
+                      {setupApiResult === 'fail' && <div className="bg-red-50 border border-red-200 rounded-xl p-3"><p className="text-red-600 font-bold text-sm">연결 실패. URL과 배포 설정을 확인해 주세요.</p></div>}
+                    </div>
+                  </div>
+                </>) : (<>
+                  {/* ── 템플릿 없을 때: 기존 수동 방식 (3단계) ── */}
+
+                  {/* Step 1: Google Sheet 만들기 */}
+                  <div className="rounded-2xl border-2 border-blue-200 overflow-hidden">
+                    <div className="bg-blue-600 text-white px-4 py-3 flex items-center gap-3">
+                      <span className="w-7 h-7 bg-white text-blue-600 rounded-full flex items-center justify-center text-sm font-black shrink-0">1</span>
+                      <span className="font-black">Google Sheet 만들기</span>
+                    </div>
+                    <div className="p-4 bg-blue-50 space-y-3">
+                      <p className="text-sm font-bold text-slate-600">아래 버튼을 눌러 새 Google Sheet를 만드세요.</p>
+                      <button onClick={() => window.open('https://sheets.new', '_blank')} className="w-full py-3 bg-white text-blue-700 rounded-xl font-black border-2 border-blue-200 hover:bg-blue-100 transition-colors flex items-center justify-center gap-2 text-base">
+                        <ExternalLink className="w-5 h-5" /> Google Sheet 새로 만들기
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Step 2: 코드 복사 + 배포 */}
+                  <div className="rounded-2xl border-2 border-indigo-200 overflow-hidden">
+                    <div className="bg-indigo-600 text-white px-4 py-3 flex items-center gap-3">
+                      <span className="w-7 h-7 bg-white text-indigo-600 rounded-full flex items-center justify-center text-sm font-black shrink-0">2</span>
+                      <span className="font-black">코드 붙여넣기 & 배포</span>
+                    </div>
+                    <div className="p-4 bg-indigo-50 space-y-3">
+                      <div className="bg-white rounded-xl p-3 space-y-2 border border-indigo-100">
+                        <div className="flex items-start gap-2">
+                          <span className="w-5 h-5 bg-indigo-100 text-indigo-600 rounded-full flex items-center justify-center text-xs font-black shrink-0 mt-0.5">a</span>
+                          <p className="text-sm font-bold text-slate-700">시트 상단 <span className="px-2 py-0.5 bg-slate-800 text-white rounded text-xs font-black">확장 프로그램</span> → <span className="px-2 py-0.5 bg-slate-800 text-white rounded text-xs font-black">Apps Script</span></p>
+                        </div>
+                        <div className="flex items-start gap-2">
+                          <span className="w-5 h-5 bg-indigo-100 text-indigo-600 rounded-full flex items-center justify-center text-xs font-black shrink-0 mt-0.5">b</span>
+                          <p className="text-sm font-bold text-slate-700">기존 코드 <span className="text-red-500 font-black">전체 선택(Ctrl+A)</span> → <span className="text-red-500 font-black">삭제</span></p>
+                        </div>
+                        <div className="flex items-start gap-2">
+                          <span className="w-5 h-5 bg-indigo-100 text-indigo-600 rounded-full flex items-center justify-center text-xs font-black shrink-0 mt-0.5">c</span>
+                          <p className="text-sm font-bold text-slate-700">아래 버튼으로 복사 → <span className="text-blue-600 font-black">붙여넣기(Ctrl+V)</span> → <span className="text-blue-600 font-black">저장(Ctrl+S)</span></p>
+                        </div>
+                      </div>
+                      <button onClick={async () => {
+                        try {
+                          const res = await fetch('/apps-script.js');
+                          const code = await res.text();
+                          await navigator.clipboard.writeText(code);
+                          alert('코드가 복사되었습니다!\n\nApps Script 에디터에서 Ctrl+V로 붙여넣기하세요.');
+                        } catch { alert('복사 실패. /apps-script.js 파일을 직접 열어 복사해 주세요.'); }
+                      }} className="w-full py-3 bg-indigo-600 text-white rounded-xl font-black hover:bg-indigo-700 transition-colors flex items-center justify-center gap-2 text-base">
+                        <Copy className="w-5 h-5" /> 코드 한 번에 복사하기
+                      </button>
+                      <div className="bg-white rounded-xl p-3 space-y-2 border border-indigo-100 mt-2">
+                        <p className="text-xs font-black text-indigo-700">코드 저장 후 배포:</p>
+                        <div className="flex items-start gap-2">
+                          <span className="w-5 h-5 bg-purple-100 text-purple-600 rounded-full flex items-center justify-center text-xs font-black shrink-0 mt-0.5">d</span>
+                          <p className="text-sm font-bold text-slate-700"><span className="px-2 py-0.5 bg-blue-600 text-white rounded text-xs font-black">배포</span> → <span className="px-2 py-0.5 bg-slate-800 text-white rounded text-xs font-black">새 배포</span></p>
+                        </div>
+                        <div className="flex items-start gap-2">
+                          <span className="w-5 h-5 bg-purple-100 text-purple-600 rounded-full flex items-center justify-center text-xs font-black shrink-0 mt-0.5">e</span>
+                          <p className="text-sm font-bold text-slate-700">톱니바퀴 → <span className="px-2 py-0.5 bg-slate-800 text-white rounded text-xs font-black">웹 앱</span> → 액세스: <span className="px-2 py-0.5 bg-red-500 text-white rounded text-xs font-black">모든 사용자</span> → <span className="px-2 py-0.5 bg-blue-600 text-white rounded text-xs font-black">배포</span></p>
+                        </div>
+                        <div className="flex items-start gap-2">
+                          <span className="w-5 h-5 bg-purple-100 text-purple-600 rounded-full flex items-center justify-center text-xs font-black shrink-0 mt-0.5">f</span>
+                          <p className="text-sm font-bold text-slate-700">승인 → 나온 <span className="text-green-600 font-black">URL을 복사</span></p>
+                        </div>
+                      </div>
+                      <div className="bg-amber-50 border border-amber-200 rounded-xl p-2.5">
+                        <p className="text-xs font-bold text-amber-700">"확인되지 않은 앱" 경고 → <span className="font-black">고급 → 이동</span> 클릭하세요</p>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Step 3: URL 입력 */}
+                  <div className="rounded-2xl border-2 border-green-200 overflow-hidden">
+                    <div className="bg-green-600 text-white px-4 py-3 flex items-center gap-3">
+                      <span className="w-7 h-7 bg-white text-green-600 rounded-full flex items-center justify-center text-sm font-black shrink-0">3</span>
+                      <span className="font-black">URL 붙여넣기 & 연결</span>
+                    </div>
+                    <div className="p-4 bg-green-50 space-y-3">
+                      <input type="text" value={setupApiUrl} onChange={(e) => { setSetupApiUrl(e.target.value); setSetupApiResult(null); }} placeholder="https://script.google.com/macros/s/..." className="w-full px-4 py-3.5 bg-white border-2 border-green-300 rounded-xl font-bold focus:border-green-500 focus:outline-none text-sm" />
+                      <button onClick={async () => {
+                        if (!setupApiUrl.trim()) return;
+                        setSetupApiTesting(true); setSetupApiResult(null);
+                        const ok = await testApiConnection(setupApiUrl.trim());
+                        setSetupApiTesting(false);
+                        if (ok) {
+                          setSetupApiResult('success');
+                          const url = setupApiUrl.trim();
+                          setApiUrl(url);
+                          localStorage.setItem('church_api_url', url);
+                          updateChurchConfig({ ...churchConfig, apiUrl: url });
+                          await gasPost(url, { action: 'updateConfig', config: churchConfig }).catch(console.error);
+                          setTimeout(() => setShowSetupWizard(false), 800);
+                        } else { setSetupApiResult('fail'); }
+                      }} disabled={setupApiTesting || !setupApiUrl.trim()} className="w-full py-3.5 bg-green-600 text-white rounded-xl font-black flex items-center justify-center gap-2 hover:bg-green-700 transition-colors text-base">
+                        {setupApiTesting ? <><Loader2 className="w-5 h-5 animate-spin" /> 연결 테스트 중...</> : <><CheckCircle2 className="w-5 h-5" /> 연결 테스트 & 완료</>}
+                      </button>
+                      {setupApiResult === 'success' && <div className="text-center py-2"><p className="text-green-600 font-black text-lg">연결 성공!</p></div>}
+                      {setupApiResult === 'fail' && <div className="bg-red-50 border border-red-200 rounded-xl p-3"><p className="text-red-600 font-bold text-sm">연결 실패. URL과 배포 설정을 확인해 주세요.</p></div>}
+                    </div>
+                  </div>
+                </>)}
+
+                <button onClick={() => { setShowSetupWizard(false); }} className="w-full py-3 bg-slate-100 text-slate-500 rounded-2xl font-bold">나중에 설정하기</button>
               </div>
             )}
           </div>
@@ -1207,52 +1938,44 @@ const App: React.FC = () => {
         </div>
       )}
 
-      {/* 입장 모달: 역할 선택(학생/교사/관리자) + 비밀번호(교사·관리자) */}
+      {/* 입장 모달: 비밀번호 입력 (교사/관리자) */}
       {showTeacherAuthModal && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 backdrop-blur-md p-6">
           <div className="bg-white p-8 rounded-[40px] shadow-2xl w-full max-w-[340px] space-y-5 animate-in zoom-in-95 duration-300">
-            {authRoleChoice === null ? (
+            {authRoleChoice === 'admin' && connectionMode === 'cloud' ? (
               <>
                 <div className="text-center space-y-2">
-                  <h3 className="text-xl font-black text-slate-900">누구로 입장할까요?</h3>
-                  <p className="text-slate-500 font-bold text-sm">역할을 선택해 주세요</p>
+                  <div className="w-16 h-16 bg-slate-800 rounded-2xl flex items-center justify-center mx-auto text-white shadow-lg"><Lock className="w-8 h-8" /></div>
+                  <h3 className="text-xl font-black text-slate-900">관리자 전용실</h3>
+                  <p className="text-slate-500 font-bold text-sm">Google 계정으로 로그인해 주세요</p>
                 </div>
-                <div className="flex flex-col gap-3">
-                  <button onClick={() => { setShowTeacherAuthModal(false); setAuthRoleChoice(null); if (!userName) setShowNamePrompt(true); }} className="flex items-center gap-3 w-full py-4 px-5 bg-sky-50 text-sky-700 rounded-2xl font-bold border-2 border-sky-100 hover:bg-sky-100 transition-colors">
-                    <User className="w-6 h-6" />
-                    <span>학생</span>
-                  </button>
-                  <button onClick={() => setAuthRoleChoice('teacher')} className="flex items-center gap-3 w-full py-4 px-5 bg-slate-100 text-slate-700 rounded-2xl font-bold border-2 border-slate-200 hover:bg-slate-200 transition-colors">
-                    <KeyRound className="w-6 h-6" />
-                    <span>교사</span>
-                  </button>
-                  <button onClick={() => setAuthRoleChoice('admin')} className="flex items-center gap-3 w-full py-4 px-5 bg-slate-700 text-white rounded-2xl font-bold border-2 border-slate-600 hover:bg-slate-800 transition-colors">
-                    <Lock className="w-6 h-6" />
-                    <span>관리자</span>
-                  </button>
-                </div>
+                <button onClick={adminGoogleLogin} className="w-full flex items-center justify-center gap-3 py-3.5 bg-white border-2 border-slate-200 rounded-[20px] font-bold text-slate-700 hover:bg-slate-50 transition-colors active:scale-95">
+                  <svg className="w-5 h-5" viewBox="0 0 24 24"><path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 0 1-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z" fill="#4285F4"/><path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/><path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05"/><path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/></svg>
+                  Google로 로그인
+                </button>
+                <button onClick={() => { setAuthRoleChoice(null); setShowTeacherAuthModal(false); }} className="w-full py-3 bg-slate-100 text-slate-500 rounded-[20px] font-bold hover:bg-slate-200 transition-colors">취소</button>
               </>
             ) : (
               <>
                 <div className="text-center space-y-2">
-                  <div className="w-16 h-16 bg-slate-800 rounded-2xl flex items-center justify-center mx-auto text-white shadow-lg">{authRoleChoice === 'admin' ? <Lock className="w-8 h-8" /> : <KeyRound className="w-8 h-8" />}</div>
-                  <h3 className="text-xl font-black text-slate-900">{authRoleChoice === 'admin' ? '관리자' : '교사'} 입장</h3>
+                  <div className={`w-16 h-16 ${authRoleChoice === 'admin' ? 'bg-slate-800' : 'bg-indigo-600'} rounded-2xl flex items-center justify-center mx-auto text-white shadow-lg`}>{authRoleChoice === 'admin' ? <Lock className="w-8 h-8" /> : <KeyRound className="w-8 h-8" />}</div>
+                  <h3 className="text-xl font-black text-slate-900">{authRoleChoice === 'admin' ? '관리자 전용실' : '교사 전용실'}</h3>
                   <p className="text-slate-500 font-bold text-sm">{authRoleChoice === 'admin' ? '관리자' : '교사'} 비밀번호를 입력해 주세요!</p>
                 </div>
                 <div className="relative">
-                  <input 
-                    type="password" 
-                    value={teacherPassword} 
-                    onChange={(e) => setTeacherPassword(e.target.value)} 
-                    onKeyDown={(e) => e.key === 'Enter' && verifyTeacherPassword()} 
-                    placeholder="비밀번호 4자리" 
-                    className="w-full px-6 py-3.5 bg-slate-50 border-2 border-slate-100 rounded-[20px] font-bold text-xl text-center focus:border-slate-800 focus:outline-none tracking-[0.8em]" 
+                  <input
+                    type="password"
+                    value={teacherPassword}
+                    onChange={(e) => setTeacherPassword(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && verifyTeacherPassword()}
+                    placeholder="비밀번호 4자리"
+                    className="w-full px-6 py-3.5 bg-slate-50 border-2 border-slate-100 rounded-[20px] font-bold text-xl text-center focus:border-slate-800 focus:outline-none tracking-[0.8em]"
                   />
                   <KeyRound className="absolute right-5 top-1/2 -translate-y-1/2 text-slate-300 w-5 h-5" />
                 </div>
                 <div className="flex gap-2">
                   <button onClick={() => { setAuthRoleChoice(null); setTeacherPassword(''); setShowTeacherAuthModal(false); }} className="flex-1 py-3.5 bg-slate-100 text-slate-500 rounded-[20px] font-bold hover:bg-slate-200 transition-colors">취소</button>
-                  <button onClick={verifyTeacherPassword} className="flex-2 py-3.5 bg-slate-800 text-white rounded-[20px] font-black shadow-lg shadow-slate-200 hover:bg-slate-900 transition-all active:scale-95">입장하기</button>
+                  <button onClick={verifyTeacherPassword} className={`flex-2 py-3.5 ${authRoleChoice === 'admin' ? 'bg-slate-800 hover:bg-slate-900 shadow-slate-200' : 'bg-indigo-600 hover:bg-indigo-700 shadow-indigo-200'} text-white rounded-[20px] font-black shadow-lg transition-all active:scale-95`}>입장하기</button>
                 </div>
               </>
             )}
@@ -1260,35 +1983,44 @@ const App: React.FC = () => {
         </div>
       )}
 
-      <header className="sticky top-0 z-50 flex items-center justify-between px-6 py-4 bg-white/90 backdrop-blur-md shadow-sm border-b border-sky-100">
-        <div className="flex items-center gap-3 cursor-pointer" onClick={resetView}>
-          <div className="p-2 text-white bg-sky-400 rounded-xl shadow-sky-200 shadow-lg"><Sparkles className="w-6 h-6" /></div>
-          <div className="hidden sm:block">
-            <h1 className="text-xl font-black leading-none text-sky-900">{churchConfig.departmentName || churchConfig.eventName || 'Bible Education'}</h1>
-            <div className="flex items-center gap-1">
-              <Trophy className="w-3 h-3 text-amber-500" />
-              <p className="text-[10px] font-black text-sky-600 uppercase tracking-wider">교리 퀴즈 대정복</p>
-            </div>
-          </div>
+      {!showSetupWizard && <header className="sticky top-0 z-50 bg-white/90 backdrop-blur-md shadow-sm border-b border-sky-100">
+        <div className="flex items-center justify-between px-3 sm:px-6 py-2 sm:py-4 gap-2">
+        <div className="flex items-center gap-2 sm:gap-3 cursor-pointer shrink-0" onClick={resetView}>
+          <div className="p-1.5 sm:p-2 text-white bg-sky-400 rounded-xl shadow-sky-200 shadow-lg"><Sparkles className="w-5 h-5 sm:w-6 sm:h-6" /></div>
+          <span className="hidden sm:block text-lg font-black text-sky-900">{churchConfig.departmentName || churchConfig.eventName || 'Bible Education'}</span>
         </div>
         <div className="flex items-center gap-4">
-          {/* 툴바: 주요 액션 + D/T/M (앱 톤 흰 카드) */}
-          <div className="bg-white rounded-2xl shadow-sm border border-sky-100 px-3 py-2 flex items-center gap-2">
-            <button onClick={handleTeacherLoungeClick} className={`flex items-center gap-2 px-3 py-2 rounded-xl font-bold text-sm transition-colors border ${isTeacherAuthenticated ? 'bg-slate-700 text-white hover:bg-slate-800 border-slate-600' : 'bg-sky-50 text-sky-700 hover:bg-sky-100 border-sky-100'}`}>
-              {isTeacherAuthenticated ? <Library className="w-4 h-4 sm:w-5 sm:h-5" /> : <KeyRound className="w-4 h-4 sm:w-5 sm:h-5" />}
-              <span className="hidden sm:inline">{isTeacherAuthenticated ? '교사 라운지' : '입장'}</span>
-            </button>
-            <div className="flex items-center gap-2 px-3 py-2 sm:px-4 bg-amber-100 border-2 border-amber-200 rounded-2xl shadow-sm">
-              <Coins className="w-4 h-4 sm:w-5 sm:h-5 text-amber-500 fill-amber-500" />
-              <span className="font-black text-amber-700 tabular-nums text-sm sm:text-base">{talents}</span>
-            </div>
-            {classes.length > 0 && (
-              <button onClick={() => { resetView(); setShowClassListView(true); }} className="flex items-center gap-2 px-3 py-2 rounded-xl font-bold text-sm transition-colors bg-sky-50 text-sky-700 hover:bg-sky-100 border border-sky-100" title="반별 친구들">
-                <Users className="w-4 h-4 sm:w-5 sm:h-5" />
-                <span className="hidden sm:inline">반별 친구들</span>
+          {connectionMode === 'cloud' && !cloudOnline && (
+            <span className="px-2 py-1 bg-red-100 text-red-600 text-xs font-bold rounded-lg animate-pulse">오프라인</span>
+          )}
+          {/* 툴바 */}
+          <div className="bg-white rounded-2xl shadow-sm border border-sky-100 px-2 sm:px-3 py-2 flex items-center flex-wrap gap-1.5 sm:gap-2">
+            {userName ? (
+              <span className="flex items-center gap-1.5 px-2 sm:px-3 py-1.5 sm:py-2 rounded-xl font-bold text-xs sm:text-sm bg-sky-100 text-sky-700 border border-sky-200">
+                <User className="w-4 h-4" />
+                <span>{userName}</span>
+              </span>
+            ) : (
+              <button onClick={() => setShowNamePrompt(true)} className="flex items-center gap-1.5 px-2 sm:px-3 py-1.5 sm:py-2 rounded-xl font-bold text-xs sm:text-sm transition-colors border bg-sky-50 text-sky-700 hover:bg-sky-100 border-sky-100">
+                <User className="w-4 h-4" />
+                <span className="hidden sm:inline">로그인</span>
               </button>
             )}
-            <button onClick={() => { resetView(); setActiveTab('shop'); }} title={`${churchConfig.currencyName}상점`} className={`flex items-center gap-2 px-3 py-2 rounded-xl transition-colors border ${activeTab === 'shop' ? 'bg-sky-500 text-white border-sky-500' : 'bg-sky-50 text-sky-700 hover:bg-sky-100 border-sky-100'}`}><ShoppingBag className="w-5 h-5 sm:w-6 sm:h-6 shrink-0" /><span className="hidden sm:inline font-bold">{churchConfig.currencyName}상점</span></button>
+            {isAdmin && (
+              <button onClick={handleAdminLogout} className="p-1.5 sm:p-2 rounded-xl bg-red-50 text-red-400 hover:bg-red-100 border border-red-100 transition-colors" title="관리자 로그아웃">
+                <LogOut className="w-4 h-4" />
+              </button>
+            )}
+            <div className="flex items-center gap-1.5 px-2 py-1.5 sm:px-3 sm:py-2 bg-amber-100 border-2 border-amber-200 rounded-xl sm:rounded-2xl shadow-sm">
+              <Coins className="w-4 h-4 text-amber-500 fill-amber-500" />
+              <span className="font-black text-amber-700 tabular-nums text-xs sm:text-base">{talents}</span>
+            </div>
+            {classes.length > 0 && (
+              <button onClick={() => { resetView(); setShowClassListView(true); }} className="p-1.5 sm:p-2 rounded-xl bg-sky-50 text-sky-700 hover:bg-sky-100 border border-sky-100 transition-colors" title="반별 친구들">
+                <Users className="w-4 h-4" />
+              </button>
+            )}
+            <button onClick={() => { resetView(); setActiveTab('shop'); }} title={`${churchConfig.currencyName}상점`} className={`p-1.5 sm:p-2 rounded-xl transition-colors border ${activeTab === 'shop' ? 'bg-sky-500 text-white border-sky-500' : 'bg-sky-50 text-sky-700 hover:bg-sky-100 border-sky-100'}`}><ShoppingBag className="w-4 h-4 sm:w-5 sm:h-5" /></button>
             {import.meta.env.DEV && (
               <div className="hidden sm:block relative border-l border-sky-100 pl-2">
                 <button type="button" onClick={() => setShowPreviewViewportDropdown(v => !v)} className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-bold ${previewViewport ? 'bg-slate-700 text-white' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`} title="미리보기">
@@ -1307,8 +2039,8 @@ const App: React.FC = () => {
           </div>
           {/* 사용자: 프로필 필 (이름 있을 때만; 없을 땐 입장→학생으로 이름 입력 유도) */}
           {userName && (
-            <div className="rounded-2xl px-3 py-2 bg-sky-50 border border-sky-100 flex items-center gap-2">
-              <span className="text-xs font-black text-sky-700 hidden md:block">
+            <div className="rounded-xl sm:rounded-2xl px-2 sm:px-3 py-1.5 sm:py-2 bg-sky-50 border border-sky-100 flex items-center gap-1.5 sm:gap-2 shrink-0">
+              <span className="text-[10px] sm:text-xs font-black text-sky-700 hidden md:block">
                 {userName} 어린이
                 {currentClass && (
                   <span className={currentClassColor ? `ml-1 px-1.5 py-0.5 rounded ${currentClassColor.bg} ${currentClassColor.text}` : ''}>
@@ -1320,9 +2052,53 @@ const App: React.FC = () => {
             </div>
           )}
         </div>
-      </header>
+        </div>
+        <div className="overflow-hidden bg-gradient-to-r from-sky-500 via-indigo-500 to-sky-500 bg-[length:200%_auto] animate-[shimmer_4s_linear_infinite] py-1 sm:py-1.5">
+          <div className="flex items-center justify-center gap-1.5 sm:gap-2">
+            <Trophy className="w-3 h-3 sm:w-4 sm:h-4 text-amber-300 shrink-0" />
+            <p className="text-xs sm:text-base md:text-xl font-black text-white tracking-wider sm:tracking-widest animate-pulse whitespace-nowrap">다음세대 조직신학 대정복</p>
+            <Trophy className="w-3 h-3 sm:w-4 sm:h-4 text-amber-300 shrink-0" />
+          </div>
+        </div>
+        <style>{`@keyframes shimmer { 0% { background-position: 200% center; } 100% { background-position: -200% center; } }`}</style>
+        {classes.length > 0 && (
+          <div className="border-b-2 border-slate-200 bg-white">
+            <div className="flex items-center gap-2 px-3 sm:px-5 py-2.5 sm:py-3 overflow-x-auto scrollbar-hide">
+              <Users className="w-5 h-5 text-slate-500 shrink-0" />
+              {classes.map(c => {
+                const color = getClassColor(c.id);
+                const isExpanded = expandedClassId === c.id;
+                const count = students.filter(s => s.classId === c.id).length;
+                return (
+                  <button key={c.id} onClick={() => setExpandedClassId(isExpanded ? null : c.id)} className={`px-4 sm:px-5 py-2 sm:py-2.5 rounded-2xl text-sm sm:text-base font-black transition-all shrink-0 flex items-center gap-1.5 ${isExpanded ? `${color.bg} text-white shadow-lg scale-105` : 'bg-slate-100 text-slate-700 hover:bg-slate-200 border-2 border-slate-200'}`}>
+                    {c.name}반
+                    <span className={`text-xs font-bold px-1.5 py-0.5 rounded-full ${isExpanded ? 'bg-white/30 text-white' : 'bg-slate-300/50 text-slate-500'}`}>{count}</span>
+                  </button>
+                );
+              })}
+            </div>
+            {expandedClassId && (() => {
+              const cls = classes.find(c => c.id === expandedClassId);
+              const classStudents = students.filter(s => s.classId === expandedClassId);
+              const color = getClassColor(expandedClassId);
+              if (!cls) return null;
+              return (
+                <div className={`px-4 sm:px-6 py-3 sm:py-4 border-t-2 ${color.light} animate-in slide-in-from-top-2 duration-200`}>
+                  <div className="flex flex-wrap gap-2">
+                    {classStudents.length === 0 ? (
+                      <span className="text-sm text-slate-400 font-bold">배정된 학생이 없어요</span>
+                    ) : classStudents.map(s => (
+                      <span key={s.id} className={`px-3 sm:px-4 py-1.5 sm:py-2 rounded-xl text-sm sm:text-base font-bold border-2 ${color.border} ${color.light} text-slate-800`}>{s.name}</span>
+                    ))}
+                  </div>
+                </div>
+              );
+            })()}
+          </div>
+        )}
+      </header>}
 
-      <main className={`p-4 sm:p-6 mx-auto transition-all ${previewViewport === 'desktop' ? 'max-w-[1280px]' : previewViewport === 'tablet' ? 'max-w-[768px]' : previewViewport === 'mobile' ? 'max-w-[375px]' : 'max-w-4xl'} ${previewViewport ? 'ring-2 ring-amber-300 ring-inset rounded-lg' : ''}`}>
+      {!showSetupWizard && <main className={`p-4 sm:p-6 mx-auto transition-all ${previewViewport === 'desktop' ? 'max-w-[1280px]' : previewViewport === 'tablet' ? 'max-w-[768px]' : previewViewport === 'mobile' ? 'max-w-[375px]' : 'max-w-4xl'} ${previewViewport ? 'ring-2 ring-amber-300 ring-inset rounded-lg' : ''}`}>
         {showClassListView ? (
           <div className="space-y-6 animate-in fade-in duration-300">
             <div className="flex items-center gap-4">
@@ -1480,7 +2256,7 @@ const App: React.FC = () => {
               </div>
             )}
           </div>
-        ) : !selectedTopic && activeTab !== 'teacher' ? (
+        ) : !selectedTopic && activeTab !== 'teacher' && activeTab !== 'admin' ? (
           activeTab === 'shop' ? (
             <div className="space-y-8 animate-in fade-in duration-500">
               <div className="flex flex-wrap items-center justify-between gap-4">
@@ -1552,7 +2328,7 @@ const App: React.FC = () => {
                           <p className="font-bold text-slate-400">완료했어요!</p>
                         ) : ch.id === 'ch-game' ? (
                           (() => {
-                            tetrisOnCompleteRef.current = () => { addTalents(ch.talents); setCompletedChallenges(prev => [...prev, ch.id]); };
+                            tetrisOnCompleteRef.current = () => { addTalents(ch.talents); markChallengeComplete(ch.id); };
                             if (!tetrisGameStarted && !tetrisGameOver) {
                               return (
                                 <div className="space-y-3">
@@ -1621,7 +2397,7 @@ const App: React.FC = () => {
                             </div>
                             <div className="flex gap-2">
                               <button onClick={() => setCurrentBibleVerseKey(bibleEntries[Math.floor(Math.random() * bibleEntries.length)]?.[0] ?? currentBibleVerseKey)} className="px-4 py-2 bg-slate-100 text-slate-600 rounded-xl font-bold text-sm">다른 구절 보기</button>
-                              <button onClick={() => { addTalents(ch.talents); setCompletedChallenges(prev => [...prev, ch.id]); }} className="px-6 py-3 bg-amber-500 text-white rounded-2xl font-black hover:bg-amber-600">소리 내어 읽었어요</button>
+                              <button onClick={() => { addTalents(ch.talents); markChallengeComplete(ch.id); }} className="px-6 py-3 bg-amber-500 text-white rounded-2xl font-black hover:bg-amber-600">소리 내어 읽었어요</button>
                             </div>
                           </div>
                         ) : ch.id === 'ch-kakao' ? (
@@ -1636,10 +2412,10 @@ const App: React.FC = () => {
                                 </a>
                               ))}
                             </div>
-                            <button onClick={() => { addTalents(ch.talents); setCompletedChallenges(prev => [...prev, ch.id]); }} className="px-6 py-3 bg-amber-500 text-white rounded-2xl font-black hover:bg-amber-600">인사 보냈어요</button>
+                            <button onClick={() => { addTalents(ch.talents); markChallengeComplete(ch.id); }} className="px-6 py-3 bg-amber-500 text-white rounded-2xl font-black hover:bg-amber-600">인사 보냈어요</button>
                           </div>
                         ) : (
-                          <button onClick={() => { setCompletedChallenges(prev => [...prev, ch.id]); addTalents(ch.talents); }} className="px-6 py-3 bg-amber-500 text-white rounded-2xl font-black hover:bg-amber-600">완료했어요</button>
+                          <button onClick={() => { markChallengeComplete(ch.id); addTalents(ch.talents); }} className="px-6 py-3 bg-amber-500 text-white rounded-2xl font-black hover:bg-amber-600">완료했어요</button>
                         )
                       ) : (
                         <div className="space-y-2">
@@ -1651,7 +2427,7 @@ const App: React.FC = () => {
                           ) : isBetPending ? (
                             <>
                               <p className="font-bold text-slate-600">{pendingBetAmount} {churchConfig.currencyName} 걸었어요. 완료하면 2배로 받아요!</p>
-                              <button onClick={() => { addTalents(pendingBetAmount * 2); setCompletedChallenges(prev => [...prev, ch.id]); setPendingBetChallengeId(null); setPendingBetAmount(0); }} className="px-6 py-3 bg-amber-500 text-white rounded-2xl font-black hover:bg-amber-600">완료했어요 (2배 받기)</button>
+                              <button onClick={() => { addTalents(pendingBetAmount * 2); markChallengeComplete(ch.id); setPendingBetChallengeId(null); setPendingBetAmount(0); }} className="px-6 py-3 bg-amber-500 text-white rounded-2xl font-black hover:bg-amber-600">완료했어요 (2배 받기)</button>
                             </>
                           ) : (
                             <div className="flex flex-wrap items-center gap-2">
@@ -1668,91 +2444,100 @@ const App: React.FC = () => {
             </div>
           ) : (
             <div className="space-y-12 animate-in fade-in duration-700">
-              <div className="space-y-4 text-center pt-8">
-                <div className="inline-block px-6 py-2 bg-amber-100 text-amber-600 rounded-full font-black text-sm mb-2 shadow-sm border border-amber-200">🏆 성경 퀴즈대회 완벽 대비!</div>
-                <h2 className="text-4xl md:text-5xl font-black tracking-tight text-sky-900 leading-tight">{getDisplayTitle().line1}<br/><span className="text-sky-500 relative inline-block">{getDisplayTitle().line2}<span className="absolute bottom-0 left-0 w-full h-3 bg-sky-200/50 -z-10 rounded-full"></span></span></h2>
-                <p className="text-slate-500 font-bold text-xl md:text-2xl">(초등부 어린이 조직신학)</p>
+              <div className="space-y-3 sm:space-y-4 text-center pt-4 sm:pt-8 px-2">
+                <h2 className="text-2xl sm:text-4xl md:text-5xl font-black tracking-tight text-sky-900 leading-tight">{getDisplayTitle().line1}<br/><span className="text-sky-500 relative inline-block">{getDisplayTitle().line2}<span className="absolute bottom-0 left-0 w-full h-2 sm:h-3 bg-sky-200/50 -z-10 rounded-full"></span></span></h2>
+                <p className="text-slate-500 font-bold text-base sm:text-xl md:text-2xl">(다음세대 조직신학)</p>
               </div>
-              
-              <button 
-                onClick={() => startQuiz()} 
-                className="w-full relative group overflow-hidden bg-gradient-to-r from-amber-400 to-amber-600 p-8 md:p-10 rounded-[48px] shadow-2xl shadow-amber-100 flex flex-col md:flex-row items-center justify-between gap-6 transition-all hover:scale-[1.02] active:scale-95 text-white"
-              >
-                <div className="absolute top-1/2 -right-4 -translate-y-1/2 opacity-10 group-hover:scale-110 transition-transform"><Trophy className="w-64 h-64" /></div>
-                <div className="flex items-center gap-8 relative z-10 w-full md:w-auto">
-                  <div className="w-20 h-20 bg-white/20 rounded-[32px] flex items-center justify-center backdrop-blur-md shadow-inner">
-                    <Gamepad2 className="w-10 h-10" />
-                  </div>
-                  <div className="text-left">
-                    <h3 className="text-3xl font-black mb-2 tracking-tight">교리퀴즈 전체 도전</h3>
-                    <p className="font-bold opacity-90 text-amber-50 text-lg">모든 주제의 문제를 랜덤하게 풀어보세요!</p>
-                    <p className="mt-1 font-black text-amber-100 text-sm">완료 시 5 {churchConfig.currencyName}</p>
-                  </div>
-                </div>
-                <div className="flex items-center gap-3 bg-white/20 px-8 py-4 rounded-[28px] font-black text-xl backdrop-blur-md border border-white/30 relative z-10 group-hover:bg-white group-hover:text-amber-600 transition-all shadow-lg">
-                  전체 도전 시작 <Zap className="w-5 h-5 fill-current" />
-                </div>
-              </button>
 
-              <div className={`grid gap-6 ${previewGridCols ?? 'grid-cols-1 md:grid-cols-2 lg:grid-cols-3'}`}>
+              <div className={`grid gap-4 sm:gap-6 ${previewGridCols ?? 'grid-cols-1 md:grid-cols-2 lg:grid-cols-3'}`}>
                 {THEOLOGY_TOPICS.map((topic) => (
-                  <button key={topic.id} onClick={() => setSelectedTopic(topic)} className="relative flex flex-col items-center gap-4 p-8 transition-all duration-300 bg-white border-2 border-transparent group rounded-[40px] shadow-lg hover:shadow-2xl hover:border-sky-200 overflow-hidden text-center">
-                    <div className={`p-6 rounded-3xl ${topic.color} text-white group-hover:scale-110 transition-transform shadow-lg shadow-sky-100`}><topic.Icon className="w-10 h-10" /></div>
-                    <div><h3 className="text-xl font-black">{topic.title}</h3><p className="text-xs font-bold text-slate-400 tracking-widest uppercase mt-1">{topic.subTitle}</p></div>
-                    <div className="absolute top-0 right-0 p-4 transition-opacity opacity-5 group-hover:opacity-10"><topic.Icon className="w-16 h-16" /></div>
+                  <button key={topic.id} onClick={() => setSelectedTopic(topic)} className="relative flex flex-col items-center gap-3 sm:gap-4 p-5 sm:p-8 transition-all duration-300 bg-white border-2 border-transparent group rounded-3xl sm:rounded-[40px] shadow-lg hover:shadow-2xl hover:border-sky-200 overflow-hidden text-center">
+                    <div className={`p-4 sm:p-6 rounded-2xl sm:rounded-3xl ${topic.color} text-white group-hover:scale-110 transition-transform shadow-lg shadow-sky-100`}><topic.Icon className="w-8 h-8 sm:w-10 sm:h-10" /></div>
+                    <div><h3 className="text-base sm:text-xl font-black">{topic.title}</h3><p className="text-[10px] sm:text-xs font-bold text-slate-400 tracking-widest uppercase mt-1">{topic.subTitle}</p></div>
+                    <div className="absolute top-0 right-0 p-4 transition-opacity opacity-5 group-hover:opacity-10"><topic.Icon className="w-12 sm:w-16 h-12 sm:h-16" /></div>
                   </button>
                 ))}
-                <button onClick={() => { setSelectedChallengeRoom(true); setSelectedTopic(null); }} className="relative flex flex-col items-center gap-4 p-8 transition-all duration-300 bg-amber-500 border-2 border-transparent group rounded-[40px] shadow-lg hover:shadow-2xl hover:bg-amber-600 overflow-hidden text-center">
-                  <div className="p-6 rounded-3xl bg-amber-400 text-white group-hover:scale-110 transition-transform shadow-lg"><Trophy className="w-10 h-10" /></div>
-                  <div><h3 className="text-xl font-black text-white">챌린지 방</h3><p className="text-xs font-bold text-amber-100 tracking-widest uppercase mt-1">게임·성경·카톡으로 {churchConfig.currencyName} 모으기</p></div>
+                <button onClick={() => { setSelectedChallengeRoom(true); setSelectedTopic(null); }} className="relative flex flex-col items-center gap-3 sm:gap-4 p-5 sm:p-8 transition-all duration-300 bg-amber-500 border-2 border-transparent group rounded-3xl sm:rounded-[40px] shadow-lg hover:shadow-2xl hover:bg-amber-600 overflow-hidden text-center">
+                  <div className="p-4 sm:p-6 rounded-2xl sm:rounded-3xl bg-amber-400 text-white group-hover:scale-110 transition-transform shadow-lg"><Trophy className="w-8 h-8 sm:w-10 sm:h-10" /></div>
+                  <div><h3 className="text-base sm:text-xl font-black text-white">챌린지 방</h3><p className="text-[10px] sm:text-xs font-bold text-amber-100 tracking-widest uppercase mt-1">게임·성경·카톡으로 {churchConfig.currencyName} 모으기</p></div>
                 </button>
-                <button onClick={handleTeacherLoungeClick} className="relative flex flex-col items-center gap-4 p-8 transition-all duration-300 bg-slate-800 border-2 border-transparent group rounded-[40px] shadow-lg hover:shadow-2xl hover:bg-slate-900 overflow-hidden text-center">
-                  <div className="p-6 rounded-3xl bg-slate-600 text-white group-hover:scale-110 transition-transform shadow-lg">{isTeacherAuthenticated ? <Library className="w-10 h-10" /> : <Lock className="w-10 h-10" />}</div>
-                  <div><h3 className="text-xl font-black text-white">교사 전용실</h3><p className="text-xs font-bold text-slate-400 tracking-widest uppercase mt-1">자료 관리 & 스테이션</p></div>
-                  {!isTeacherAuthenticated && <div className="absolute top-3 right-3 bg-amber-400 text-amber-900 p-2 rounded-xl shadow-lg animate-pulse"><KeyRound className="w-4 h-4" /></div>}
+                <button onClick={() => startQuiz()} className="relative flex flex-col items-center gap-3 sm:gap-4 p-5 sm:p-8 transition-all duration-300 bg-gradient-to-br from-orange-500 to-red-500 border-2 border-transparent group rounded-3xl sm:rounded-[40px] shadow-lg hover:shadow-2xl hover:from-orange-600 hover:to-red-600 overflow-hidden text-center">
+                  <div className="p-4 sm:p-6 rounded-2xl sm:rounded-3xl bg-white/20 text-white group-hover:scale-110 transition-transform shadow-lg backdrop-blur-sm"><Gamepad2 className="w-8 h-8 sm:w-10 sm:h-10" /></div>
+                  <div><h3 className="text-base sm:text-xl font-black text-white">교리퀴즈 전체 도전</h3><p className="text-[10px] sm:text-xs font-bold text-orange-100 tracking-widest uppercase mt-1">모든 주제 랜덤 도전 · 완료 시 5 {churchConfig.currencyName}</p></div>
                 </button>
+              </div>
+
+              {/* ── 교사 · 관리자 영역 ── */}
+              <div className="relative mt-14 pt-12">
+                <div className="absolute inset-x-0 top-0 flex items-center">
+                  <div className="flex-1 h-[3px] bg-slate-800"></div>
+                  <span className="px-5 py-1.5 text-sm font-black text-white bg-slate-800 rounded-full">교사 · 관리자 전용</span>
+                  <div className="flex-1 h-[3px] bg-slate-800"></div>
+                </div>
+                <div className={`grid gap-4 sm:gap-6 ${previewGridCols ?? 'grid-cols-1 md:grid-cols-2 lg:grid-cols-3'}`}>
+                  <button onClick={handleTeacherLoungeClick} className="relative flex flex-col items-center gap-3 sm:gap-4 p-5 sm:p-8 transition-all duration-300 bg-indigo-600 border-2 border-transparent group rounded-3xl sm:rounded-[40px] shadow-lg hover:shadow-2xl hover:bg-indigo-700 overflow-hidden text-center">
+                    <div className="p-4 sm:p-6 rounded-2xl sm:rounded-3xl bg-indigo-500 text-white group-hover:scale-110 transition-transform shadow-lg">{isTeacherAuthenticated ? <Library className="w-8 h-8 sm:w-10 sm:h-10" /> : <KeyRound className="w-8 h-8 sm:w-10 sm:h-10" />}</div>
+                    <div><h3 className="text-base sm:text-xl font-black text-white">교사 전용실</h3><p className="text-[10px] sm:text-xs font-bold text-indigo-200 tracking-widest uppercase mt-1">자료 · 미션확인 · 보상</p></div>
+                    {!isTeacherAuthenticated && <div className="absolute top-3 right-3 bg-amber-400 text-amber-900 p-2 rounded-xl shadow-lg animate-pulse"><KeyRound className="w-4 h-4" /></div>}
+                  </button>
+                  <button onClick={handleAdminRoomClick} className="relative flex flex-col items-center gap-3 sm:gap-4 p-5 sm:p-8 transition-all duration-300 bg-slate-800 border-2 border-transparent group rounded-3xl sm:rounded-[40px] shadow-lg hover:shadow-2xl hover:bg-slate-900 overflow-hidden text-center">
+                    <div className="p-4 sm:p-6 rounded-2xl sm:rounded-3xl bg-slate-600 text-white group-hover:scale-110 transition-transform shadow-lg">{isAdmin ? <Settings className="w-8 h-8 sm:w-10 sm:h-10" /> : <Lock className="w-8 h-8 sm:w-10 sm:h-10" />}</div>
+                    <div><h3 className="text-base sm:text-xl font-black text-white">관리자 전용실</h3><p className="text-[10px] sm:text-xs font-bold text-slate-400 tracking-widest uppercase mt-1">설정 · 상점 · 반 관리</p></div>
+                    {!isAdmin && <div className="absolute top-3 right-3 bg-amber-400 text-amber-900 p-2 rounded-xl shadow-lg animate-pulse"><Lock className="w-4 h-4" /></div>}
+                  </button>
+                  {isAdmin && (
+                    <button onClick={() => { setSetupStep(1); setSetupConfig({ ...churchConfig }); setShowSetupWizard(true); }} className="relative flex flex-col items-center gap-3 sm:gap-4 p-5 sm:p-8 transition-all duration-300 bg-gradient-to-br from-rose-500 to-purple-600 border-2 border-transparent group rounded-3xl sm:rounded-[40px] shadow-lg hover:shadow-2xl hover:from-rose-600 hover:to-purple-700 overflow-hidden text-center">
+                      <div className="p-4 sm:p-6 rounded-2xl sm:rounded-3xl bg-white/20 text-white group-hover:scale-110 transition-transform shadow-lg backdrop-blur-sm"><Settings className="w-8 h-8 sm:w-10 sm:h-10" /></div>
+                      <div><h3 className="text-base sm:text-xl font-black text-white">초기 설정</h3><p className="text-[10px] sm:text-xs font-bold text-rose-100 tracking-widest uppercase mt-1">교회명 · 비밀번호 · 클라우드</p></div>
+                    </button>
+                  )}
+                </div>
               </div>
             </div>
           )
-        ) : activeTab === 'teacher' ? (
+        ) : (activeTab === 'teacher' || activeTab === 'admin') ? (
           <div className="flex flex-col md:flex-row gap-6 animate-in fade-in duration-500">
             <aside className="md:w-64 shrink-0 flex flex-col gap-4">
               <div className="flex items-center justify-between gap-2">
                 <button onClick={resetView} className="p-3 bg-white rounded-2xl shadow-sm hover:bg-slate-50 transition-colors"><ChevronLeft className="w-6 h-6" /></button>
-                <button onClick={() => { setIsTeacherAuthenticated(false); setIsAdmin(false); resetView(); }} className="p-3 bg-slate-800 text-white rounded-2xl shadow-sm hover:bg-slate-900 transition-all flex items-center gap-2 font-bold text-sm"><Lock className="w-4 h-4" /> 잠금</button>
+                {activeTab === 'admin' ? (
+                  <button onClick={handleAdminLogout} className="p-3 bg-slate-800 text-white rounded-2xl shadow-sm hover:bg-slate-900 transition-all flex items-center gap-2 font-bold text-sm"><Lock className="w-4 h-4" /> 잠금</button>
+                ) : (
+                  <button onClick={() => { setIsTeacherAuthenticated(false); setSelectedTeacherCategory(null); setActiveTab('info'); }} className="p-3 bg-indigo-600 text-white rounded-2xl shadow-sm hover:bg-indigo-700 transition-all flex items-center gap-2 font-bold text-sm"><Lock className="w-4 h-4" /> 잠금</button>
+                )}
               </div>
               <div className="mb-2">
-                <h2 className="text-xl font-black text-slate-800">교사 라운지</h2>
+                <h2 className="text-xl font-black text-slate-800">{activeTab === 'admin' ? '관리자 전용실' : '교사 전용실'}</h2>
                 <p className="text-slate-400 font-bold text-xs mt-0.5">메뉴를 선택하세요</p>
               </div>
               <nav className="flex md:flex-col gap-2 overflow-x-auto md:overflow-visible pb-2 md:pb-0 scrollbar-hide">
-                {TEACHER_CATEGORIES.map((cat) => (
-                  <button key={cat.id} onClick={() => setSelectedTeacherCategory(cat)} className={`flex items-center gap-3 px-4 py-3 rounded-2xl text-left transition-all shrink-0 md:shrink-none font-bold ${selectedTeacherCategory?.id === cat.id ? 'bg-slate-800 text-white shadow-lg' : 'bg-white border-2 border-slate-100 hover:border-slate-200 text-slate-700'}`}>
-                    <div className={`p-2 rounded-xl ${selectedTeacherCategory?.id === cat.id ? 'bg-white/20' : cat.color} ${selectedTeacherCategory?.id === cat.id ? 'text-white' : 'text-white'}`}><cat.Icon className="w-5 h-5" /></div>
+                {currentCategories.map((cat) => (
+                  <button key={cat.id} onClick={() => setSelectedCategory(cat)} className={`flex items-center gap-3 px-4 py-3 rounded-2xl text-left transition-all shrink-0 md:shrink-none font-bold ${selectedCategory?.id === cat.id ? (activeTab === 'admin' ? 'bg-slate-800' : 'bg-indigo-600') + ' text-white shadow-lg' : 'bg-white border-2 border-slate-100 hover:border-slate-200 text-slate-700'}`}>
+                    <div className={`p-2 rounded-xl ${selectedCategory?.id === cat.id ? 'bg-white/20' : cat.color} ${selectedCategory?.id === cat.id ? 'text-white' : 'text-white'}`}><cat.Icon className="w-5 h-5" /></div>
                     <span className="text-sm">{cat.name}</span>
                   </button>
                 ))}
               </nav>
             </aside>
             <main className="flex-1 min-w-0">
-              {!selectedTeacherCategory ? (
+              {!selectedCategory ? (
                 <div className="flex flex-col items-center justify-center py-24 bg-white rounded-[40px] border-4 border-dashed border-slate-100 text-center px-6">
-                  <Library className="w-16 h-16 text-slate-200 mb-4" />
+                  {activeTab === 'admin' ? <Settings className="w-16 h-16 text-slate-200 mb-4" /> : <Library className="w-16 h-16 text-slate-200 mb-4" />}
                   <p className="text-slate-400 font-bold text-lg">왼쪽 메뉴에서 항목을 선택하세요.</p>
                 </div>
               ) : (
                 <div className="space-y-6 animate-in slide-in-from-right-10 duration-300">
                   <div className="flex items-center gap-3">
-                    <div className={`p-3 rounded-2xl ${selectedTeacherCategory.color} text-white`}>
-                      <selectedTeacherCategory.Icon className="w-6 h-6" />
+                    <div className={`p-3 rounded-2xl ${selectedCategory.color} text-white`}>
+                      <selectedCategory.Icon className="w-6 h-6" />
                     </div>
                     <div>
-                      <h2 className="text-2xl font-black text-slate-800">{selectedTeacherCategory.name}</h2>
+                      <h2 className="text-2xl font-black text-slate-800">{selectedCategory.name}</h2>
                       <p className="text-slate-400 font-bold text-sm">자료를 확인하고 관리하세요.</p>
                     </div>
                   </div>
 
-                {selectedTeacherCategory.id === 'mission-confirm' ? (
+                {selectedCategory.id === 'mission-confirm' ? (
                   <div className="bg-white p-6 sm:p-10 rounded-[40px] shadow-2xl border-4 border-teal-100 space-y-8">
                     <h4 className="text-xl font-black text-slate-800">오늘의 미션 확인</h4>
                     <p className="text-slate-600 font-medium text-sm">학생이 완료한 미션을 확인하고 확인 버튼을 누르면 해당 학생에게 3 {churchConfig.currencyName}가 부여됩니다.</p>
@@ -1784,7 +2569,7 @@ const App: React.FC = () => {
                       </div>
                     )}
                   </div>
-                ) : selectedTeacherCategory.id === 'talent-gifts' ? (
+                ) : selectedCategory.id === 'talent-gifts' ? (
                   <div className="bg-white p-6 sm:p-10 rounded-[40px] shadow-2xl border-4 border-amber-100 space-y-8">
                     {loggedInStudents.length > 0 && (
                       <div className="p-4 bg-sky-50 rounded-2xl border-2 border-sky-100">
@@ -1901,7 +2686,7 @@ const App: React.FC = () => {
                       </div>
                     </div>
                   </div>
-                ) : selectedTeacherCategory.id === 'shop-admin' ? (
+                ) : selectedCategory.id === 'shop-admin' ? (
                   <div className="bg-white p-6 sm:p-10 rounded-[40px] shadow-2xl border-4 border-emerald-100 space-y-8">
                     <div className="flex flex-col sm:flex-row gap-4 flex-wrap">
                       <input type="text" value={newShopItemName} onChange={(e) => setNewShopItemName(e.target.value)} placeholder="아이템 이름" className="flex-1 min-w-[120px] px-4 py-3 bg-slate-50 border-2 border-slate-100 rounded-2xl font-bold focus:border-emerald-400 focus:outline-none" />
@@ -1943,7 +2728,7 @@ const App: React.FC = () => {
                       )}
                     </div>
                   </div>
-                ) : selectedTeacherCategory.id === 'logged-in-students' ? (
+                ) : selectedCategory.id === 'logged-in-students' ? (
                   <div className="bg-white p-6 sm:p-10 rounded-[40px] shadow-2xl border-4 border-sky-100 space-y-6">
                     <h4 className="text-xl font-black text-slate-800">로그인한 학생 명단</h4>
                     {loggedInStudents.length === 0 ? (
@@ -1989,7 +2774,7 @@ const App: React.FC = () => {
                       </div>
                     )}
                   </div>
-                ) : selectedTeacherCategory.id === 'class-management' ? (
+                ) : selectedCategory.id === 'class-management' ? (
                   <div className="bg-white p-6 sm:p-10 rounded-[40px] shadow-2xl border-4 border-violet-100 space-y-8">
                     {loggedInStudents.length > 0 && (
                       <div className="p-4 bg-sky-50 rounded-2xl border-2 border-sky-100">
@@ -2090,7 +2875,7 @@ const App: React.FC = () => {
                       </div>
                     )}
                   </div>
-                ) : selectedTeacherCategory.id === 'church-settings' ? (
+                ) : selectedCategory.id === 'church-settings' ? (
                   <div className="bg-white p-6 sm:p-10 rounded-[40px] shadow-2xl border-4 border-gray-100 space-y-8">
                     <h4 className="text-xl font-black text-slate-800 flex items-center gap-2"><Settings className="w-6 h-6 text-gray-500" /> 교회 설정</h4>
 
@@ -2113,15 +2898,17 @@ const App: React.FC = () => {
                     </div>
 
                     <div className="space-y-4 pt-4 border-t border-slate-100">
-                      <h5 className="font-black text-slate-700">비밀번호 설정</h5>
-                      <div className="grid gap-3 sm:grid-cols-2">
-                        <div>
-                          <label className="text-sm font-bold text-slate-500 mb-1 block">교사 비밀번호</label>
-                          <input type="text" value={churchConfig.teacherPassword} onChange={(e) => updateChurchConfig({ ...churchConfig, teacherPassword: e.target.value })} className="w-full px-4 py-3 bg-slate-50 border-2 border-slate-100 rounded-2xl font-bold focus:border-sky-400 focus:outline-none" />
+                      <h5 className="font-black text-slate-700">비밀번호 관리</h5>
+                      <div className="grid gap-4">
+                        <div className="p-4 bg-slate-800 rounded-2xl space-y-2">
+                          <label className="text-sm font-black text-white flex items-center gap-2"><Lock className="w-4 h-4" /> 관리자 비밀번호</label>
+                          <input type="text" value={churchConfig.adminPassword} onChange={(e) => { const newPw = e.target.value; updateChurchConfig({ ...churchConfig, adminPassword: newPw }); localStorage.setItem('church_admin_session', newPw); }} className="w-full px-4 py-3 bg-white border-2 border-slate-200 rounded-2xl font-bold focus:border-sky-400 focus:outline-none text-center text-lg tracking-widest" />
+                          <p className="text-xs text-slate-400">변경 시 즉시 적용됩니다</p>
                         </div>
-                        <div>
-                          <label className="text-sm font-bold text-slate-500 mb-1 block">관리자 비밀번호</label>
-                          <input type="text" value={churchConfig.adminPassword} onChange={(e) => updateChurchConfig({ ...churchConfig, adminPassword: e.target.value })} className="w-full px-4 py-3 bg-slate-50 border-2 border-slate-100 rounded-2xl font-bold focus:border-sky-400 focus:outline-none" />
+                        <div className="p-4 bg-indigo-50 rounded-2xl space-y-2 border-2 border-indigo-100">
+                          <label className="text-sm font-black text-indigo-700 flex items-center gap-2"><KeyRound className="w-4 h-4" /> 교사 비밀번호</label>
+                          <input type="text" value={churchConfig.teacherPassword} onChange={(e) => updateChurchConfig({ ...churchConfig, teacherPassword: e.target.value })} className="w-full px-4 py-3 bg-white border-2 border-indigo-200 rounded-2xl font-bold focus:border-indigo-400 focus:outline-none text-center text-lg tracking-widest" />
+                          <p className="text-xs text-indigo-400">교사 전용실 입장용</p>
                         </div>
                       </div>
                     </div>
@@ -2183,41 +2970,103 @@ const App: React.FC = () => {
                       )}
                     </div>
 
-                    <div className="pt-4 border-t border-slate-100">
-                      <button onClick={() => {
-                        if (!confirm('모든 데이터(학생, 반, 보상, 미션 등)를 초기화할까요? 교회 설정은 유지됩니다.')) return;
-                        ['church_students','church_classes','church_talents','church_missions','church_stickers','church_shop_items','church_challenges','church_completed_challenges','church_pending_missions','church_blocked_students','church_logged_in_students','church_user_name','church_first_login_done'].forEach(k => localStorage.removeItem(k));
-                        window.location.reload();
-                      }} className="px-6 py-3 bg-red-500 text-white rounded-2xl font-black hover:bg-red-600 flex items-center gap-2"><RefreshCw className="w-5 h-5" /> 데이터 초기화</button>
-                    </div>
-                  </div>
-                ) : MATERIAL_CATEGORY_IDS.includes(selectedTeacherCategory.id) ? (
-                  <div className="bg-white p-6 sm:p-10 rounded-[40px] shadow-2xl border-4 border-slate-100 space-y-6">
-                    <input ref={materialFileInputRef} type="file" accept=".pdf,.ppt,.pptx,.doc,.docx,.hwp,image/*" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) uploadMaterial(selectedTeacherCategory.id, f); e.target.value = ''; }} />
-                    <div className="flex items-center justify-between flex-wrap gap-4">
-                      <h4 className="text-xl font-black text-slate-800">다운로드할 자료</h4>
-                      {isAdmin && (
-                        <button onClick={() => materialFileInputRef.current?.click()} className="px-6 py-3 bg-sky-500 text-white rounded-2xl font-black hover:bg-sky-600 transition-all flex items-center gap-2">
-                          <CloudUpload className="w-5 h-5" /> 자료 올리기
+                    <div className="pt-4 border-t border-slate-100 space-y-4">
+                      <h5 className="font-black text-slate-700 flex items-center gap-2"><CloudUpload className="w-5 h-5 text-blue-500" /> Google Drive 자료 관리</h5>
+                      {connectionMode === 'cloud' ? (
+                        <div className="space-y-3">
+                          <div className="flex items-center gap-3 p-4 bg-green-50 rounded-2xl border-2 border-green-200">
+                            <CheckCircle2 className="w-6 h-6 text-green-500" />
+                            <div>
+                              <p className="font-black text-green-700">Cloud 모드 - Google Drive 자동 연결</p>
+                              <p className="text-sm font-bold text-green-600">Apps Script를 통해 자료가 관리됩니다</p>
+                            </div>
+                          </div>
+                          <button onClick={refreshDriveMaterials} disabled={gDriveLoading} className="px-4 py-2 bg-sky-50 text-sky-600 rounded-2xl font-bold text-sm hover:bg-sky-100 flex items-center gap-1">
+                            <RefreshCw className={`w-4 h-4 ${gDriveLoading ? 'animate-spin' : ''}`} /> 자료 새로고침
+                          </button>
+                        </div>
+                      ) : gDriveState.isSignedIn ? (
+                        <div className="space-y-3">
+                          <div className="flex items-center gap-3 p-4 bg-green-50 rounded-2xl border-2 border-green-200">
+                            <CheckCircle2 className="w-6 h-6 text-green-500" />
+                            <div>
+                              <p className="font-black text-green-700">연결됨</p>
+                              <p className="text-sm font-bold text-green-600">{gDriveState.userEmail}</p>
+                            </div>
+                          </div>
+                          <div className="flex gap-2">
+                            <button onClick={refreshDriveMaterials} disabled={gDriveLoading} className="px-4 py-2 bg-sky-50 text-sky-600 rounded-2xl font-bold text-sm hover:bg-sky-100 flex items-center gap-1">
+                              <RefreshCw className={`w-4 h-4 ${gDriveLoading ? 'animate-spin' : ''}`} /> 자료 새로고침
+                            </button>
+                            <button onClick={disconnectGoogleDrive} className="px-4 py-2 bg-red-50 text-red-500 rounded-2xl font-bold text-sm hover:bg-red-100">
+                              연결 해제
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <button onClick={connectGoogleDrive} disabled={gDriveLoading} className="px-6 py-3 bg-blue-500 text-white rounded-2xl font-black hover:bg-blue-600 transition-all flex items-center gap-2">
+                          {gDriveLoading ? <Loader2 className="w-5 h-5 animate-spin" /> : <CloudUpload className="w-5 h-5" />} Google Drive 연결
                         </button>
                       )}
+                      <p className="text-xs text-slate-400 font-bold">{connectionMode === 'cloud' ? '교사 라운지 자료 카테고리에서 자료를 올리고 내릴 수 있습니다.' : '교사 자료를 Google Drive에 영구 저장합니다. 관리자만 연결하면 됩니다.'}</p>
                     </div>
-                    {(materialsList[selectedTeacherCategory.id] || []).length === 0 ? (
-                      <div className="text-center py-16 bg-slate-50/50 rounded-3xl border-2 border-dashed border-slate-100">
-                        <FileText className="w-16 h-16 mx-auto text-slate-200 mb-4" />
-                        <p className="text-slate-400 font-bold">등록된 자료가 없어요. public/materials/ 폴더에 파일을 넣고 materials.json을 수정한 뒤 배포해 주세요.</p>
+
+                    <div className="pt-4 border-t border-slate-100 space-y-3">
+                      <button onClick={() => {
+                        setSetupStep(1);
+                        setSetupConfig({ ...churchConfig });
+                        setShowSetupWizard(true);
+                        setSelectedAdminCategory(null);
+                      }} className="w-full px-6 py-3 bg-slate-700 text-white rounded-2xl font-black hover:bg-slate-800 flex items-center justify-center gap-2 transition-all"><Settings className="w-5 h-5" /> 초기 설정 마법사 다시 열기</button>
+                      <button onClick={() => {
+                        const pw = prompt('관리자 비밀번호를 입력하세요:');
+                        if (pw !== churchConfig.adminPassword) { alert('비밀번호가 틀렸습니다.'); return; }
+                        if (!confirm('정말 모든 데이터(학생, 반, 보상, 미션 등)를 초기화할까요? 교회 설정은 유지됩니다.')) return;
+                        ['church_students','church_classes','church_talents','church_missions','church_stickers','church_shop_items','church_challenges','church_completed_challenges','church_pending_missions','church_blocked_students','church_logged_in_students','church_user_name','church_first_login_done'].forEach(k => localStorage.removeItem(k));
+                        if (connectionMode === 'cloud' && apiUrl) { gasPost(apiUrl, { action: 'resetData' }).catch(console.error); }
+                        window.location.reload();
+                      }} className="w-full px-6 py-3 bg-red-500 text-white rounded-2xl font-black hover:bg-red-600 flex items-center justify-center gap-2"><RefreshCw className="w-5 h-5" /> 데이터 초기화</button>
+                    </div>
+                  </div>
+                ) : MATERIAL_CATEGORY_IDS.includes(selectedCategory.id) ? (
+                  <div className="bg-white p-6 sm:p-10 rounded-[40px] shadow-2xl border-4 border-slate-100 space-y-6">
+                    <input ref={materialFileInputRef} type="file" accept=".pdf,.ppt,.pptx,.doc,.docx,.hwp,image/*" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) uploadMaterial(selectedCategory.id, f); e.target.value = ''; }} />
+                    <div className="flex items-center justify-between flex-wrap gap-4">
+                      <h4 className="text-xl font-black text-slate-800">다운로드할 자료</h4>
+                      <div className="flex items-center gap-2">
+                        {gDriveLoading && <Loader2 className="w-5 h-5 animate-spin text-sky-500" />}
+                        {gDriveState.isSignedIn && (
+                          <button onClick={refreshDriveMaterials} disabled={gDriveLoading} className="px-4 py-2 bg-slate-100 text-slate-600 rounded-xl font-bold text-sm hover:bg-slate-200 flex items-center gap-1" title="새로고침">
+                            <RefreshCw className={`w-4 h-4 ${gDriveLoading ? 'animate-spin' : ''}`} />
+                          </button>
+                        )}
+                        {isAdmin && activeTab === 'admin' && (
+                          <button onClick={() => materialFileInputRef.current?.click()} disabled={gDriveLoading} className="px-6 py-3 bg-sky-500 text-white rounded-2xl font-black hover:bg-sky-600 transition-all flex items-center gap-2">
+                            <CloudUpload className="w-5 h-5" /> 자료 올리기
+                          </button>
+                        )}
                       </div>
-                    ) : (
+                    </div>
+                    {/* Google Drive 자료 */}
+                    {(gDriveMaterials[selectedCategory.id] || []).length > 0 && (
                       <div className="grid gap-3">
-                        {(materialsList[selectedTeacherCategory.id] || []).map((m, i) => (
-                          <div key={i} className="flex items-center justify-between gap-4 p-4 bg-slate-50 hover:bg-sky-50 border-2 border-slate-100 hover:border-sky-200 rounded-2xl font-bold text-slate-700 transition-all">
-                            <span className="flex-1 min-w-0 truncate">{m.name}</span>
+                        {(gDriveMaterials[selectedCategory.id] || []).map((m) => (
+                          <div key={m.id} className="flex items-center justify-between gap-4 p-4 bg-blue-50 hover:bg-blue-100 border-2 border-blue-200 hover:border-blue-300 rounded-2xl font-bold text-slate-700 transition-all">
+                            <div className="flex items-center gap-2 flex-1 min-w-0">
+                              <CloudUpload className="w-4 h-4 text-blue-500 shrink-0" />
+                              <span className="truncate">{m.name}</span>
+                            </div>
                             <div className="flex items-center gap-2 shrink-0">
-                              <a href={m.file.startsWith('blob:') ? m.file : `/materials/${m.file}`} download={m.name} className="inline-flex items-center gap-2 px-4 py-2 bg-sky-500 text-white rounded-xl font-black hover:bg-sky-600 transition-all">
+                              <a href={m.webContentLink || `https://drive.google.com/uc?export=download&id=${m.id}`} target="_blank" rel="noopener noreferrer" download={m.name} className="inline-flex items-center gap-2 px-4 py-2 bg-sky-500 text-white rounded-xl font-black hover:bg-sky-600 transition-all">
                                 <Download className="w-5 h-5" /> 다운로드
                               </a>
-                              {isAdmin && (
-                                <button onClick={() => deleteMaterial(selectedTeacherCategory.id, i)} className="p-2 bg-red-50 text-red-400 rounded-xl hover:bg-red-500 hover:text-white transition-all shrink-0" title="삭제">
+                              {m.webViewLink && (
+                                <a href={m.webViewLink} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-2 px-3 py-2 bg-blue-500 text-white rounded-xl font-bold hover:bg-blue-600 transition-all text-sm">
+                                  <ExternalLink className="w-4 h-4" /> 보기
+                                </a>
+                              )}
+                              {isAdmin && activeTab === 'admin' && gDriveState.isSignedIn && (
+                                <button onClick={() => handleDeleteDriveFile(selectedCategory.id, m.id)} className="p-2 bg-red-50 text-red-400 rounded-xl hover:bg-red-500 hover:text-white transition-all shrink-0" title="삭제">
                                   <Trash2 className="w-5 h-5" />
                                 </button>
                               )}
@@ -2226,11 +3075,42 @@ const App: React.FC = () => {
                         ))}
                       </div>
                     )}
+                    {/* 로컬 자료 (기존 static + blob) */}
+                    {(materialsList[selectedCategory.id] || []).length > 0 && (
+                      <div className="grid gap-3">
+                        {(materialsList[selectedCategory.id] || []).map((m, i) => (
+                          <div key={i} className="flex items-center justify-between gap-4 p-4 bg-slate-50 hover:bg-sky-50 border-2 border-slate-100 hover:border-sky-200 rounded-2xl font-bold text-slate-700 transition-all">
+                            <span className="flex-1 min-w-0 truncate">{m.name}</span>
+                            <div className="flex items-center gap-2 shrink-0">
+                              <a href={m.file.startsWith('blob:') ? m.file : `/materials/${m.file}`} download={m.name} className="inline-flex items-center gap-2 px-4 py-2 bg-sky-500 text-white rounded-xl font-black hover:bg-sky-600 transition-all">
+                                <Download className="w-5 h-5" /> 다운로드
+                              </a>
+                              {isAdmin && activeTab === 'admin' && (
+                                <button onClick={() => deleteMaterial(selectedCategory.id, i)} className="p-2 bg-red-50 text-red-400 rounded-xl hover:bg-red-500 hover:text-white transition-all shrink-0" title="삭제">
+                                  <Trash2 className="w-5 h-5" />
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {/* 빈 상태 */}
+                    {(materialsList[selectedCategory.id] || []).length === 0 && (gDriveMaterials[selectedCategory.id] || []).length === 0 && (
+                      <div className="text-center py-16 bg-slate-50/50 rounded-3xl border-2 border-dashed border-slate-100">
+                        <FileText className="w-16 h-16 mx-auto text-slate-200 mb-4" />
+                        <p className="text-slate-400 font-bold">
+                          {activeTab === 'admin' && gDriveState.isSignedIn
+                            ? '등록된 자료가 없어요. "자료 올리기" 버튼으로 Google Drive에 업로드하세요.'
+                            : '등록된 자료가 없어요. 관리자가 관리자 전용실에서 자료를 업로드할 수 있어요.'}
+                        </p>
+                      </div>
+                    )}
                   </div>
                 ) : (
                   <div className="bg-white p-20 rounded-[40px] border-4 border-dashed border-slate-100 flex flex-col items-center justify-center text-center space-y-4">
                     <div className="p-8 bg-slate-50 rounded-full text-slate-200">
-                      <selectedTeacherCategory.Icon className="w-20 h-20" />
+                      <selectedCategory.Icon className="w-20 h-20" />
                     </div>
                     <div className="max-w-xs">
                       <h4 className="text-2xl font-black text-slate-800 mb-2">준비 중인 공간</h4>
@@ -2298,14 +3178,16 @@ const App: React.FC = () => {
             </div>
           </div>
         )}
-      </main>
+      </main>}
 
-      <footer className="px-6 mt-16 space-y-4 text-center pb-20">
-        <div className="flex justify-center gap-8 opacity-20 grayscale"><Sparkles className="w-6 h-6" /><Award className="w-6 h-6" /><Star className="w-6 h-6" /><Gamepad2 className="w-6 h-6" /></div>
-        <div>
-          <p className="text-sm font-black text-slate-400 uppercase tracking-widest leading-loose">© {new Date().getFullYear()} {churchConfig.churchName || 'Church Education App'}<br/>대한예수교장로회 총회훈련원 교재 기반</p>
-          <div className="flex items-center justify-center gap-1 mt-2 text-sky-300 text-xs font-black italic"><Heart className="w-3 h-3 fill-sky-200 text-sky-200" /> 어린이 조직신학 탐험대</div>
+      <footer className="px-6 mt-16 text-center pb-20 space-y-5">
+        <div className="inline-flex flex-col items-center gap-2">
+          <h3 className="text-3xl sm:text-4xl font-black tracking-tight bg-gradient-to-r from-slate-800 via-sky-600 to-slate-800 bg-clip-text text-transparent bg-[length:200%_auto] animate-[shimmer_3s_linear_infinite]" style={{fontFamily: "'Trebuchet MS', 'Arial Black', sans-serif"}}>
+            TRINITY AI FORUM
+          </h3>
+          <style>{`@keyframes shimmer { 0% { background-position: 200% center; } 100% { background-position: -200% center; } }`}</style>
         </div>
+        <p className="text-sm font-bold text-slate-400 tracking-widest" style={{fontFamily: "'Trebuchet MS', sans-serif"}}>© 2026 Developed by Yijae Shin</p>
       </footer>
     </div>
   );
